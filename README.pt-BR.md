@@ -5,13 +5,17 @@
 Baixa automaticamente os episódios das suas listas do AniList para o celular Android, prontos para assistir offline.
 Você escolhe as fontes na instalação:
 
-| Você escolhe | Motor | Fontes |
-| --- | --- | --- |
-| English | [ani-cli](https://github.com/pystardust/ani-cli) | inglês, legendado/dublado |
-| Português | [ani-tupi](https://github.com/levyvix/ani-tupi) | português do Brasil (dublado/legendado) |
+| Você escolhe | Motor principal | Reserva | Fontes |
+| --- | --- | --- | --- |
+| English | [ani-cli-rs](https://github.com/vorlie/ani-cli-rs) | [ani-cli](https://github.com/pystardust/ani-cli) | inglês, legendado/dublado; o ani-cli-rs embute as legendas no arquivo |
+| Português | [ani-tupi](https://github.com/levyvix/ani-tupi) | nenhum | português do Brasil (dublado/legendado) |
 
-> O motor ani-tupi é novidade da versão 2.0. Foi feito com base no código do ani-tupi e testado com fontes simuladas;
-> abra uma issue se alguma fonte se comportar mal no seu celular (anexe as linhas `[helper]` do `anilist-autodl logs`).
+No modo *Personalizado* dá para trocar o motor principal e o de reserva (qualquer um dos três, em qualquer ordem). O de reserva
+entra sempre que o principal não entrega um arquivo válido: anime errado, sem áudio, não encontrado, provedor fora do ar, tempo esgotado.
+
+> O ani-cli-rs e o ani-tupi são novidade aqui. Foram feitos com base na documentação / no código deles e testados com fontes
+> simuladas, não com os sites de verdade. Se algo se comportar mal, rode `anilist-autodl doctor` e anexe a saída e as linhas
+> `[helper]` / `ani-cli-rs` do `anilist-autodl logs` a uma issue.
 
 ## O que faz
 
@@ -20,13 +24,22 @@ Verifica suas listas do AniList em intervalos (padrão: a cada hora, só no Wi-F
 - **Watching:** os próximos episódios não assistidos de animes em exibição (padrão: 1 adiantado), e até 3 adiantados para animes finalizados.
 - **Planning:** ep. 1 dos animes planejados assim que começam a ser exibidos.
 - **Dublado ou legendado:** sua versão preferida, com opção de usar a outra se faltar.
-- **Limpeza:** episódios assistidos vão para uma pasta oculta `.trash` e são apagados de vez após 3 dias. Se você diminuir o
-  progresso no AniList, o episódio da lixeira é restaurado em vez de baixado de novo.
+- **Limpeza:** episódios assistidos vão para uma pasta oculta `.trash` e são apagados de vez após 3 dias. Animes que saem das listas Watching/Planning
+  (**Completed**, Dropped, Paused) também são limpos: todo arquivo que esta ferramenta baixou para eles vai para a lixeira. Se você diminuir o progresso no AniList, o episódio da lixeira é
+  restaurado em vez de baixado de novo.
 - **Proteção de armazenamento:** pausa abaixo de 2 GB livres (a lixeira é esvaziada antes).
-- **Verificações:** todo arquivo é conferido (tamanho, duração, título) antes de chegar à sua pasta de downloads.
+- **Verificações:** todo arquivo é conferido antes de chegar à sua pasta de downloads: tamanho, legível, duração, título e
+  **uma faixa de áudio** (vídeo sem som, ou com áudio que acaba antes, é rejeitado e a próxima fonte é tentada). Isso
+  aproveita a mesma chamada do `ffprobe` que já media a duração, então não custa nada a mais.
+- **Legendas (ani-cli-rs):** ele baixa as faixas de legenda do provedor e, com o ffmpeg, embute no MP4. Se um arquivo legendado
+  vier sem nenhuma, o outro catálogo do ani-cli-rs é tentado primeiro; se nenhum tiver legendas o arquivo é mantido mesmo assim
+  (pode ter legenda queimada na imagem) e o log avisa. Legenda queimada não dá para detectar, só faixas de legenda.
+- **Anime exato:** o ani-cli-rs recebe o anime pelo ID, escolhido com a mesma verificação rigorosa de título, em vez de "o
+  primeiro resultado da busca".
 - **Notificações:** download concluído, tempo esgotado, primeira falha de um episódio, pouco espaço. Em português ou inglês.
-- **Atualização automática:** mantém o motor em dia. As atualizações do ani-tupi passam por um autoteste e são **revertidas**
-  automaticamente se a nova versão deixar de funcionar com esta ferramenta.
+- **Atualização automática:** mantém os motores em dia. As atualizações do ani-tupi passam por um autoteste e são **revertidas**
+  automaticamente se a nova versão deixar de funcionar com esta ferramenta. O ani-cli-rs só é recompilado quando o repositório
+  muda, e a nova versão só substitui a instalada depois de passar por um autoteste (a antiga fica guardada como reserva).
 
 ## 1. Instalar
 
@@ -43,7 +56,9 @@ curl -fsSL https://raw.githubusercontent.com/nmfassis/anilist-autodl/main/instal
 
 | Pergunta | Padrão |
 | --- | --- |
-| Idioma / motor | English → ani-cli, Português → ani-tupi |
+| Idioma (também escolhe os motores) | English → ani-cli-rs + ani-cli de reserva, Português → ani-tupi |
+| *Personalizado:* motor principal e de reserva | pelo idioma |
+| *Personalizado:* tentar o outro catálogo do ani-cli-rs quando um arquivo legendado vier sem faixas de legenda | sim |
 | Usuário do AniList | – |
 | Dublado ou legendado (+ usar a outra versão se faltar) | legendado, com alternativa |
 | Pasta de downloads | `/sdcard/Download/Anime` |
@@ -65,6 +80,9 @@ curl -fsSL https://raw.githubusercontent.com/nmfassis/anilist-autodl/main/instal
 - O instalador começa com `pkg update && pkg upgrade`. Pode levar vários minutos e atualizar ferramentas do próprio Termux.
   Se ele parar ou o Termux reiniciar nessa etapa, **rode o mesmo comando de novo**: as respostas são salvas antes e ele continua.
 - Com o ani-tupi, a primeira instalação compila o `pydantic-core` (5–15 min). Mantenha o Termux aberto; o instalador segura um wake lock.
+- O ani-cli-rs **não tem binário para Android**, então o instalador o compila a partir do código com Rust (5–15 min, até 4 jobs de
+  compilação para o celular não ficar sem memória). Se a compilação falhar, o instalador segue com o motor de reserva como
+  principal e avisa; rode de novo para tentar outra vez.
 - O ani-tupi exige Python 3.12 ou mais novo (o Termux atual já tem).
 - Prefere um arquivo? `bash install.sh` a partir de um clone também funciona, e o antigo `install_anime_downloader.sh` continua funcionando.
 
@@ -84,7 +102,9 @@ tabela abaixo), `--yes`, `--no-run`, `--reconfigure`, `--uninstall`.
 anilist-autodl run        # verifica o AniList e baixa agora, com saída ao vivo
 anilist-autodl status     # configurações, job agendado, versão do motor, últimas linhas do log
 anilist-autodl logs       # acompanha o log (use "full" para a saída do yt-dlp/ffmpeg)
-anilist-autodl update     # atualiza o motor agora
+anilist-autodl update     # atualiza os motores agora
+anilist-autodl doctor     # testa cada motor e mostra o que o ani-cli-rs realmente devolve
+anilist-autodl check ARQ  # faixas de áudio/legenda de um vídeo e se ele seria aceito
 anilist-autodl retry      # esquece episódios que falharam para tentar de novo na próxima execução
 anilist-autodl config     # muda qualquer configuração (refaz as perguntas)
 anilist-autodl job        # roda uma vez pelo agendador do Android, como as execuções automáticas
@@ -99,7 +119,9 @@ para o agendamento ser registrado de novo.
 | Chave | Padrão | Significado |
 | --- | --- | --- |
 | `AUTODL_LANG` | `en` | `en` ou `pt` (idioma das notificações) |
-| `AUTODL_ENGINE` | pelo idioma | `ani-cli` ou `ani-tupi` |
+| `AUTODL_ENGINE` | pelo idioma | motor principal: `ani-cli-rs`, `ani-cli` ou `ani-tupi` |
+| `AUTODL_BACKUP_ENGINE` | `ani-cli` (inglês) / vazio | usado quando o principal falha; vazio = nenhum |
+| `PREFER_SUBS` | `true` | ani-cli-rs: um arquivo `sub` sem faixas de legenda faz tentar o outro catálogo antes de aceitar |
 | `ANILIST_USERNAME` | – | seu usuário do AniList |
 | `AUDIO` / `AUDIO_FALLBACK` | `sub` / `true` | versão preferida; aceitar a outra se faltar |
 | `DOWNLOAD_DIR` | `/sdcard/Download/Anime` | pasta final |
@@ -118,7 +140,8 @@ para o agendamento ser registrado de novo.
 
 ## 4. Arquivos
 
-- `~/.anilist-autodl/` — os scripts (`fetch_anime.py`, `fetch_episode_tupi.py`, `run.sh`, `update.sh`, `install.sh`)
+- `~/.anilist-autodl/` — os scripts (`fetch_anime.py`, `fetch_episode_tupi.py`, `run.sh`, `update.sh`, `install.sh`) e o código
+  do ani-cli-rs (`ani-cli-rs-src/`, compilado pelo instalador)
 - `~/.config/anilist-autodl/config` — suas configurações
 - `~/.anime_downloader.log` / `~/.anime_downloader_output.log` — log do script / saída completa
 - `~/.anime_downloader_state.json` — histórico e horários de falhas
@@ -148,11 +171,34 @@ Seus episódios baixados não são tocados.
   `termux-fix-shebang $PREFIX/bin/ani-cli`.
 - **"Overwrite? [y/N]" ou "No such file" do ffmpeg:** confira se `~/.config/yt-dlp/config` não tem `--force-overwrite` nem
   `--no-m3u8-fixup` (o instalador remove) e se só uma cópia do job roda.
+- **Um vídeo está sem som / o áudio acaba antes:** desde a 2.1 esses arquivos são rejeitados automaticamente e a próxima fonte é
+  tentada (veja no log `no audio track`). Para inspecionar qualquer arquivo: `anilist-autodl check "/sdcard/Download/Anime/Anime Episode 3.mp4"`.
+- **ani-cli-rs não acha nada ou `could not parse this output`:** rode `anilist-autodl doctor`. Ele mostra o que cada catálogo
+  devolve. O leitor foi escrito a partir da documentação e aceita vários nomes de campo; se o seu for diferente, anexe a
+  primeiras linhas que o `doctor` mostra a uma issue.
+- **Um arquivo está sem legendas:** o log diz `NO subtitle tracks` quando o ani-cli-rs entregou um sem faixas. Esse arquivo pode ter
+  legenda queimada na imagem, o que não dá para detectar. Arquivos do ani-cli ou do ani-tupi nunca são checados quanto a legendas.
+- **A compilação do ani-cli-rs falha (sem memória):** feche outros apps e rode o instalador de novo, ou escolha o ani-cli como
+  motor principal no modo *Personalizado*.
+- **Baixou o anime errado (corrigido na 2.0.1):** apague esse arquivo da sua pasta de downloads. O episódio para o qual ele
+  foi registrado será baixado de novo, agora com a verificação de título rigorosa. Se você avançou o progresso de um anime e
+  arquivos de outro foram para a `.trash`, restaure-os de `<pasta de downloads>/.trash`.
+- **Um episódio "falha" mesmo o anime existindo:** a linha do log `does not match any known title (...)` mostra quais nomes
+  foram comparados. Se a fonte usa um nome muito diferente, adicione-o como sinônimo na página do anime no AniList.
+- **Um anime completo ainda tem arquivos:** só são para a lixeira os arquivos que esta ferramenta baixou (ela guarda um
+  registro de cada um), nunca arquivos que você colocou à mão, e arquivos de versões muito antigas não têm registro. Nada vai
+  para a lixeira numa execução em que uma lista do AniList não carregou (veja `anilist-autodl logs`). Apague esses à mão.
+- **Um anime pausado/abandonado foi para a lixeira:** é o esperado, animes que saem das listas Watching/Planning perdem os
+  arquivos baixados após `TRASH_DAYS`. Volte-o para Watching nesse prazo e os episódios são restaurados da `.trash`.
 - **Marcou um episódio como assistido por engano:** ele fica 3 dias em `<pasta de downloads>/.trash`. Diminua o progresso no
   AniList e a próxima execução restaura, ou mova os arquivos de volta à mão.
 - **Nada roda automaticamente:** `termux-job-scheduler --pending` deve listar o job 1. Se não listar, rode `anilist-autodl config`.
   Confira também a configuração de bateria do passo 1.5.
 - **Sem notificações:** o Termux:API precisa estar instalado (mesma fonte do Termux) e com permissão para notificar.
+
+## Testes
+
+`python3 -m unittest discover -s tests -v` (sem rede nem Termux) cobre a verificação de títulos.
 
 ## Aviso sobre IA
 
@@ -168,8 +214,8 @@ fornecido "como está", sem garantia de qualquer tipo. Sem vínculo com AniList,
 
 ## Créditos
 
-- [ani-cli](https://github.com/pystardust/ani-cli) (GPL-3.0) e [ani-tupi](https://github.com/levyvix/ani-tupi), baixados na
-  instalação, não redistribuídos aqui.
+- [ani-cli-rs](https://github.com/vorlie/ani-cli-rs), [ani-cli](https://github.com/pystardust/ani-cli) (GPL-3.0) e
+  [ani-tupi](https://github.com/levyvix/ani-tupi), baixados ou compilados na instalação, não redistribuídos aqui.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp), [ffmpeg](https://ffmpeg.org), [Termux](https://termux.dev) e a
   [API do AniList](https://anilist.gitbook.io/anilist-apiv2-docs/).
 

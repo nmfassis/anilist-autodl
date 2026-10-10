@@ -32,9 +32,18 @@ _m_en() {
     boot_fail) echo "Could not download the installer (check your connection). URL: %s";;
     need_termux) echo "This installer must be run inside Termux.";;
     no_tty) echo "No terminal available for questions: using flags/defaults (--yes mode).";;
-    lang_pick) echo "Download sources (engine):";;
-    lang_opt_en) echo "English  (ani-cli)";;
-    lang_opt_pt) echo "Portuguese - Brazilian sources  (ani-tupi)";;
+    lang_pick) echo "Main download engine:";;
+    eng_rs) echo "ani-cli-rs  (English; Rust port: embeds subtitles, picks the exact anime) - recommended";;
+    eng_cli) echo "ani-cli  (English; the original, simple)";;
+    eng_tupi) echo "ani-tupi  (Portuguese; Brazilian sources)";;
+    eng_none) echo "None";;
+    q_backup) echo "Backup engine (used when the main one cannot deliver a valid file):";;
+    q_prefer_subs) echo "ani-cli-rs: when a subtitled file has no subtitle tracks, try its other catalog before accepting it?";;
+    st_rs) echo "Building ani-cli-rs from source (Rust compile: 5-15 min, keep Termux open)";;
+    rs_fail_swap) echo "ani-cli-rs could not be built. Using %s as the main engine instead (run the installer again to retry).";;
+    rs_fail_drop) echo "ani-cli-rs could not be built. Continuing without a backup engine.";;
+    rs_fail_die) echo "ani-cli-rs could not be built. Run the installer again or choose another engine.";;
+    upgrade_notice) echo "New in this version: ani-cli-rs (English engine that embeds subtitles and picks the exact anime) with ani-cli as backup, and an automatic audio check on every download. The questions below start from the new defaults.";;
     found_prev) echo "Found previous settings: AniList user %s, engine %s.";;
     reuse_prev) echo "Reuse them?";;
     mode_pick) echo "Setup mode:";;
@@ -134,9 +143,18 @@ _m_pt() {
     boot_fail) echo "Não foi possível baixar o instalador (verifique a conexão). URL: %s";;
     need_termux) echo "Este instalador deve ser executado dentro do Termux.";;
     no_tty) echo "Sem terminal para perguntas: usando flags/padrões (modo --yes).";;
-    lang_pick) echo "Fontes de download (motor):";;
-    lang_opt_en) echo "Inglês  (ani-cli)";;
-    lang_opt_pt) echo "Português - fontes brasileiras  (ani-tupi)";;
+    lang_pick) echo "Motor de download principal:";;
+    eng_rs) echo "ani-cli-rs  (inglês; port em Rust: embute legendas, escolhe o anime exato) - recomendado";;
+    eng_cli) echo "ani-cli  (inglês; o original, simples)";;
+    eng_tupi) echo "ani-tupi  (português; fontes brasileiras)";;
+    eng_none) echo "Nenhum";;
+    q_backup) echo "Motor de reserva (usado quando o principal não entrega um arquivo válido):";;
+    q_prefer_subs) echo "ani-cli-rs: quando um arquivo legendado vier sem faixas de legenda, tentar o outro catálogo antes de aceitar?";;
+    st_rs) echo "Compilando o ani-cli-rs a partir do código-fonte (Rust: 5-15 min, mantenha o Termux aberto)";;
+    rs_fail_swap) echo "Não foi possível compilar o ani-cli-rs. Usando %s como motor principal (rode o instalador de novo para tentar outra vez).";;
+    rs_fail_drop) echo "Não foi possível compilar o ani-cli-rs. Continuando sem motor de reserva.";;
+    rs_fail_die) echo "Não foi possível compilar o ani-cli-rs. Rode o instalador de novo ou escolha outro motor.";;
+    upgrade_notice) echo "Novidade desta versão: ani-cli-rs (motor em inglês que embute legendas e escolhe o anime exato) com o ani-cli de reserva, e uma checagem automática de áudio em todo download. As perguntas abaixo partem dos novos padrões.";;
     found_prev) echo "Configuração anterior encontrada: usuário AniList %s, motor %s.";;
     reuse_prev) echo "Reaproveitar?";;
     mode_pick) echo "Modo de configuração:";;
@@ -242,7 +260,7 @@ die()  { printf '\033[0;31mError:\033[0m %s\n' "$*" >&2; exit 1; }
 out()  { printf '%s\n' "$*"; }   # stdout stays the terminal even under `curl | bash`; only stdin is the script
 
 # ------------------------------------------------------------------ options / state
-KEYS=(AUTODL_LANG AUTODL_ENGINE ANILIST_USERNAME AUDIO AUDIO_FALLBACK DOWNLOAD_DIR AHEAD_FINISHED AHEAD_AIRING
+KEYS=(AUTODL_LANG AUTODL_ENGINE AUTODL_BACKUP_ENGINE PREFER_SUBS ANILIST_USERNAME AUDIO AUDIO_FALLBACK DOWNLOAD_DIR AHEAD_FINISHED AHEAD_AIRING
       DOWNLOAD_PLANNING INTERVAL_MINUTES RETRY_COOLDOWN_HOURS TIMEOUT_MINUTES MIN_FREE_GB TRASH_DAYS
       WIFI_ONLY BATTERY_NOT_LOW AUTO_UPDATE UPDATE_EVERY_DAYS)
 declare -A PRESET=()
@@ -253,7 +271,8 @@ NO_RUN=0
 INTERACTIVE=1
 
 init_defaults() {
-  AUTODL_LANG=""; AUTODL_ENGINE=""; ANILIST_USERNAME=""
+  AUTODL_LANG=""; AUTODL_ENGINE=""; AUTODL_BACKUP_ENGINE=""; PREFER_SUBS=true; ANILIST_USERNAME=""
+  UPGRADE_NOTICE=0
   AUDIO=sub; AUDIO_FALLBACK=true
   DOWNLOAD_DIR=/sdcard/Download/Anime
   AHEAD_FINISHED=3; AHEAD_AIRING=1; DOWNLOAD_PLANNING=true
@@ -400,15 +419,20 @@ bootstrap() {
 
 # ------------------------------------------------------------------ steps
 load_previous() {
-  OLD_ENGINE=""; HAD_CONFIG=0
+  OLD_ENGINE=""; OLD_BACKUP=""; HAD_CONFIG=0
   if [ -f "$CONF" ]; then
     # shellcheck disable=SC1090
-    . "$CONF"; HAD_CONFIG=1; OLD_ENGINE="$AUTODL_ENGINE"
+    . "$CONF"; HAD_CONFIG=1; OLD_ENGINE="$AUTODL_ENGINE"; OLD_BACKUP="$AUTODL_BACKUP_ENGINE"
+    # A config written by an older version (no backup key) that used ani-cli: when asked interactively, start from the
+    # new defaults (ani-cli-rs + ani-cli backup). Unattended runs never switch engines on their own.
+    if ! grep -q '^AUTODL_BACKUP_ENGINE=' "$CONF" && [ "$AUTODL_ENGINE" = ani-cli ] && [ "$INTERACTIVE" = 1 ]; then
+      AUTODL_ENGINE=ani-cli-rs; AUTODL_BACKUP_ENGINE=ani-cli; UPGRADE_NOTICE=1
+    fi
   elif [ -f "$HOME/fetch_anime.py" ]; then            # pre-1.0 layout: reuse what it knew
     local u
     u="$(sed -n "s/^ANILIST_USERNAME = '\\(.*\\)'.*/\\1/p" "$HOME/fetch_anime.py" | head -n1)"
     [ "$u" = "YOUR_ANILIST_USERNAME" ] || ANILIST_USERNAME="$u"
-    if [ -f "$HOME/fetch_episode_tupi.py" ]; then AUTODL_ENGINE=ani-tupi; else AUTODL_ENGINE=ani-cli; fi
+    if [ -f "$HOME/fetch_episode_tupi.py" ]; then AUTODL_ENGINE=ani-tupi; fi
     local old_dir
     old_dir="$(sed -n "s/^DOWNLOAD_DIR = '\\(.*\\)'.*/\\1/p" "$HOME/fetch_anime.py" | head -n1)"
     [ -n "$old_dir" ] && DOWNLOAD_DIR="$old_dir"
@@ -421,11 +445,15 @@ choose_ui_language() {
     ask_choice AUTODL_LANG "" "$AUTODL_LANG" en "English" pt "Português (Brasil)"     # validates the preset only
   elif [ "$INTERACTIVE" = 1 ] && [ "$HAD_CONFIG" = 0 ] && [ "$ACTION" = install ]; then
     ask_choice AUTODL_LANG "Language / Idioma:" "$AUTODL_LANG" \
-      en "English  (English sources: ani-cli)" pt "Português  (fontes brasileiras: ani-tupi)"
+      en "English  (English sources: ani-cli-rs, with ani-cli as backup)" pt "Português  (fontes brasileiras: ani-tupi)"
   fi
   case "$AUTODL_LANG" in en|pt) ;; *) AUTODL_LANG=en;; esac
   UI="$AUTODL_LANG"
 }
+
+default_backup_for() { [ "$1" = ani-cli-rs ] && echo ani-cli || echo ""; }
+
+chain_has() { [ "$AUTODL_ENGINE" = "$1" ] || [ "${AUTODL_BACKUP_ENGINE:-}" = "$1" ]; }
 
 questions() {
   if [ -z "$MODE" ]; then
@@ -433,25 +461,41 @@ questions() {
     else ask_choice MODE "$(m mode_pick)" quick quick "$(m mode_quick)" custom "$(m mode_custom)"; fi
   fi
 
-  # Engine = which sources to search. Quick mode derives it from the language; custom mode lets you change it.
-  local def_engine="$AUTODL_ENGINE"
-  [ -n "$def_engine" ] || { [ "$UI" = pt ] && def_engine=ani-tupi || def_engine=ani-cli; }
+  # Engines. Quick mode derives them from the language; custom mode (or --engine / --set) lets you choose.
+  local def_engine="$AUTODL_ENGINE" def_backup="$AUTODL_BACKUP_ENGINE"
+  if [ -z "$def_engine" ]; then
+    if [ "$UI" = pt ]; then def_engine=ani-tupi; def_backup=""; else def_engine=ani-cli-rs; def_backup=ani-cli; fi
+  fi
   if [ "$MODE" = custom ] || is_preset AUTODL_ENGINE; then
-    ask_choice AUTODL_ENGINE "$(m lang_pick)" "$def_engine" ani-cli "$(m lang_opt_en)" ani-tupi "$(m lang_opt_pt)"
+    ask_choice AUTODL_ENGINE "$(m lang_pick)" "$def_engine" \
+      ani-cli-rs "$(m eng_rs)" ani-cli "$(m eng_cli)" ani-tupi "$(m eng_tupi)"
+    [ "$AUTODL_ENGINE" = "$def_engine" ] || def_backup="$(default_backup_for "$AUTODL_ENGINE")"
   else
     AUTODL_ENGINE="$def_engine"
+  fi
+  if [ "$MODE" = custom ] || is_preset AUTODL_BACKUP_ENGINE; then
+    local -a opts=(none "$(m eng_none)") e
+    for e in ani-cli-rs ani-cli ani-tupi; do
+      [ "$e" = "$AUTODL_ENGINE" ] && continue
+      case "$e" in ani-cli-rs) opts+=("$e" "$(m eng_rs)");; ani-cli) opts+=("$e" "$(m eng_cli)");; *) opts+=("$e" "$(m eng_tupi)");; esac
+    done
+    ask_choice AUTODL_BACKUP_ENGINE "$(m q_backup)" "${def_backup:-none}" "${opts[@]}"
+    [ "$AUTODL_BACKUP_ENGINE" = none ] && AUTODL_BACKUP_ENGINE=""
+  else
+    AUTODL_BACKUP_ENGINE="$def_backup"
   fi
 
   ask ANILIST_USERNAME "$(m q_user)" "${ANILIST_USERNAME:-}" v_user
   [ -n "$ANILIST_USERNAME" ] || die "$(m need_user)"
 
   local head; head="$(m q_audio)"
-  [ "$AUTODL_ENGINE" = ani-tupi ] && head="$head $(m audio_note_tupi)"
+  chain_has ani-tupi && head="$head $(m audio_note_tupi)"
   ask_choice AUDIO "$head" "$AUDIO" sub "$(m audio_sub)" dub "$(m audio_dub)"
 
   [ "$MODE" = custom ] || return 0
 
   ask_yn AUDIO_FALLBACK "$(m q_audio_fb)" "$AUDIO_FALLBACK"
+  chain_has ani-cli-rs && ask_yn PREFER_SUBS "$(m q_prefer_subs)" "$PREFER_SUBS"
   ask    DOWNLOAD_DIR "$(m q_dir)" "$DOWNLOAD_DIR" v_dir
   ask    AHEAD_FINISHED "$(m q_ahead_fin)" "$AHEAD_FINISHED" v_posint
   ask    AHEAD_AIRING "$(m q_ahead_air)" "$AHEAD_AIRING" v_posint
@@ -472,12 +516,13 @@ questions() {
 }
 
 apply_presets_quiet() {  # keys that were set with --set but not asked in quick mode
-  local k
+  local k yn
   for k in "${KEYS[@]}"; do
     if is_preset "$k"; then
       case "$k" in
-        AUDIO_FALLBACK|DOWNLOAD_PLANNING|WIFI_ONLY|BATTERY_NOT_LOW|AUTO_UPDATE)
-          printf -v "$k" '%s' "$(norm_yn "${PRESET[$k]}")" || die "$(m bad_preset "$k" "${PRESET[$k]}")";;
+        AUDIO_FALLBACK|PREFER_SUBS|DOWNLOAD_PLANNING|WIFI_ONLY|BATTERY_NOT_LOW|AUTO_UPDATE)
+          yn="$(norm_yn "${PRESET[$k]}")" || die "$(m bad_preset "$k" "${PRESET[$k]}")"
+          printf -v "$k" '%s' "$yn";;
         INTERVAL_MINUTES)
           v_interval "${PRESET[$k]}" || die "$(m bad_preset "$k" "${PRESET[$k]}")"
           INTERVAL_MINUTES="$(interval_to_min "${PRESET[$k]}")";;
@@ -485,13 +530,16 @@ apply_presets_quiet() {  # keys that were set with --set but not asked in quick 
       esac
     fi
   done
+  [ "$AUTODL_BACKUP_ENGINE" = none ] && AUTODL_BACKUP_ENGINE=""
   DOWNLOAD_DIR="${DOWNLOAD_DIR/#\~/$HOME}"
 }
 
 validate_all() {
   local k
   v_user "$ANILIST_USERNAME" || die "$(m bad_preset ANILIST_USERNAME "$ANILIST_USERNAME")"
-  case "$AUTODL_ENGINE" in ani-cli|ani-tupi) ;; *) die "$(m bad_preset AUTODL_ENGINE "$AUTODL_ENGINE")";; esac
+  case "$AUTODL_ENGINE" in ani-cli|ani-cli-rs|ani-tupi) ;; *) die "$(m bad_preset AUTODL_ENGINE "$AUTODL_ENGINE")";; esac
+  case "$AUTODL_BACKUP_ENGINE" in ""|ani-cli|ani-cli-rs|ani-tupi) ;; *) die "$(m bad_preset AUTODL_BACKUP_ENGINE "$AUTODL_BACKUP_ENGINE")";; esac
+  [ "$AUTODL_BACKUP_ENGINE" != "$AUTODL_ENGINE" ] || die "$(m bad_preset AUTODL_BACKUP_ENGINE "$AUTODL_BACKUP_ENGINE")"
   case "$AUDIO" in sub|dub) ;; *) die "$(m bad_preset AUDIO "$AUDIO")";; esac
   v_dir "$DOWNLOAD_DIR" || die "$(m bad_preset DOWNLOAD_DIR "$DOWNLOAD_DIR")"
   for k in AHEAD_FINISHED AHEAD_AIRING TIMEOUT_MINUTES UPDATE_EVERY_DAYS; do
@@ -509,7 +557,7 @@ show_summary() {
   [ "$AUTO_UPDATE" = true ] && upd="$(m on) / $UPDATE_EVERY_DAYS d" || upd="$(m off)"
   out ""; out "== $(m summary) =="
   out "  $(m s_user): $ANILIST_USERNAME"
-  out "  $(m s_engine): $AUTODL_ENGINE   ($(m s_ui): $AUTODL_LANG)"
+  out "  $(m s_engine): $AUTODL_ENGINE$([ -n "$AUTODL_BACKUP_ENGINE" ] && echo " + $AUTODL_BACKUP_ENGINE")   ($(m s_ui): $AUTODL_LANG)"
   out "  $(m s_audio): $AUDIO$([ "$AUDIO_FALLBACK" = true ] && echo " (+ fallback)")"
   out "  $(m s_dir): $DOWNLOAD_DIR"
   out "  $(m s_ahead): $AHEAD_FINISHED ($(m fin)) / $AHEAD_AIRING ($(m air))"
@@ -547,13 +595,28 @@ step_pkg_update() {
 step_pkg_install() {
   say "$(m st_pkg_install)"
   local pk="python git curl ffmpeg termux-api"
-  if [ "$AUTODL_ENGINE" = ani-tupi ]; then
-    pk="$pk rust clang make binutils libjpeg-turbo libpng freetype python-pillow"
-  else
-    pk="$pk aria2 fzf yt-dlp"
-  fi
+  chain_has ani-cli && pk="$pk aria2 fzf"
+  chain_has ani-cli-rs && pk="$pk rust termux-tools aria2"
+  chain_has ani-tupi && pk="$pk rust clang make binutils libjpeg-turbo libpng freetype python-pillow"
+  # yt-dlp comes from pip when ani-tupi is used (it imports it), otherwise from Termux
+  chain_has ani-tupi || pk="$pk yt-dlp"
   # shellcheck disable=SC2086
   pkg install -y $pk || die "$(m pkg_fail)"
+}
+
+step_ani_cli_rs() {
+  say "$(m st_rs)"
+  local src="$INSTALL_DIR/ani-cli-rs-src" jobs
+  jobs="$(nproc 2>/dev/null || echo 2)"; [ "$jobs" -gt 4 ] && jobs=4     # more jobs can exhaust a phone's RAM
+  mkdir -p "$INSTALL_DIR"
+  if [ -d "$src/.git" ]; then
+    git -C "$src" fetch --depth 1 origin && git -C "$src" reset --hard FETCH_HEAD || return 1
+  else
+    rm -rf "$src"; git clone --depth 1 https://github.com/vorlie/ani-cli-rs.git "$src" || return 1
+  fi
+  ( cd "$src" && CARGO_BUILD_JOBS="$jobs" cargo build --release --locked ) || return 1
+  install -Dm755 "$src/target/release/ani-cli-rs" "$PREFIX/bin/ani-cli-rs" || return 1
+  "$PREFIX/bin/ani-cli-rs" --version >/dev/null 2>&1
 }
 
 step_ani_cli() {
@@ -634,9 +697,19 @@ do_install() {
   step_storage
   step_pkg_update
   step_pkg_install
-  if [ "$AUTODL_ENGINE" = ani-tupi ]; then step_ani_tupi; else step_ani_cli; fi
+  chain_has ani-cli && step_ani_cli
+  chain_has ani-tupi && step_ani_tupi
+  if chain_has ani-cli-rs && ! step_ani_cli_rs; then          # the long Rust build is the likeliest step to fail
+    if [ "$AUTODL_BACKUP_ENGINE" = ani-cli-rs ]; then
+      warn "$(m rs_fail_drop)"; AUTODL_BACKUP_ENGINE=""; write_config
+    elif [ -n "$AUTODL_BACKUP_ENGINE" ]; then
+      warn "$(m rs_fail_swap "$AUTODL_BACKUP_ENGINE")"; AUTODL_ENGINE="$AUTODL_BACKUP_ENGINE"; AUTODL_BACKUP_ENGINE=""; write_config
+    else
+      die "$(m rs_fail_die)"
+    fi
+  fi
   step_files
-  if [ "$AUTODL_ENGINE" = ani-tupi ]; then
+  if chain_has ani-tupi; then
     python3 "$INSTALL_DIR/fetch_episode_tupi.py" --selftest || die "$(m tupi_import)"
   fi
   step_job
@@ -645,7 +718,7 @@ do_install() {
   out ""
   out "=========================================================="
   out " $(m done_title)"
-  out " $(m done_user): $ANILIST_USERNAME   $(m done_engine): $AUTODL_ENGINE"
+  out " $(m done_user): $ANILIST_USERNAME   $(m done_engine): $AUTODL_ENGINE$([ -n "$AUTODL_BACKUP_ENGINE" ] && echo " + $AUTODL_BACKUP_ENGINE")"
   out " $(m done_dir): $DOWNLOAD_DIR"
   out ""
   out "$(m done_cmds)"
@@ -665,7 +738,7 @@ do_reconfigure() {
   questions; apply_presets_quiet; validate_all
   show_summary
   write_config
-  if [ "$AUTODL_ENGINE" != "$OLD_ENGINE" ]; then
+  if [ "$AUTODL_ENGINE" != "$OLD_ENGINE" ] || [ "$AUTODL_BACKUP_ENGINE" != "$OLD_BACKUP" ]; then
     ok "$(m reconf_engine)"; find_sources
     [ -n "$SRCF" ] || die "sources not found next to the installer"
     do_install
@@ -688,7 +761,9 @@ do_uninstall() {
     termux-job-scheduler --cancel-all >/dev/null 2>&1
   fi
   rm -f "$PREFIX/bin/anilist-autodl"
+  [ -d "$INSTALL_DIR/ani-cli-rs-src" ] && rm -f "$PREFIX/bin/ani-cli-rs"      # only when this installer built it
   rm -rf "$INSTALL_DIR" "$CONF_DIR" "$HOME/.anime_tmp"
+  rm -rf "$HOME/.anime_hold"
   rm -f "$HOME"/.anime_downloader* "$HOME/.anime_download_history.json"
   ok "$(m un_done)"
 }
@@ -717,7 +792,9 @@ main() {
   [ -n "$SRCF" ] || die "installer files not found"
 
   local reuse=false
-  if [ "$HAD_CONFIG" = 1 ] && [ -n "$ANILIST_USERNAME" ] && [ -z "$MODE" ]; then
+  if [ "$UPGRADE_NOTICE" = 1 ]; then
+    out ""; out "$(m upgrade_notice)"
+  elif [ "$HAD_CONFIG" = 1 ] && [ -n "$ANILIST_USERNAME" ] && [ -z "$MODE" ]; then
     out "$(m found_prev "$ANILIST_USERNAME" "$AUTODL_ENGINE")"
     ask_yn reuse "$(m reuse_prev)" true
     [ "$INTERACTIVE" = 0 ] && reuse=true
