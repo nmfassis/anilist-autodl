@@ -10,10 +10,17 @@ Choose the sources when you install:
 | English | [ani-cli-rs](https://github.com/vorlie/ani-cli-rs) | [ani-cli](https://github.com/pystardust/ani-cli) | English sub/dub; ani-cli-rs embeds subtitles in the file |
 | Português | [ani-tupi](https://github.com/levyvix/ani-tupi) | none | Brazilian Portuguese (dublado/legendado) |
 
-You can change the main and backup engine in *Custom* mode (any of the three, in any order). The backup is used whenever the
+You can change the main and backup engine in *Custom* mode (any of the four, in any order). The backup is used whenever the
 main engine cannot deliver a valid file: wrong anime, no audio, not found, provider down, timeout.
 
-> ani-cli-rs and ani-tupi are new here. They were built against their documentation / source and tested with simulated
+**GoAnime** ([alvarorichard/GoAnime](https://github.com/alvarorichard/GoAnime)) is also available as an optional engine, for
+English (`anidb`) and Brazilian Portuguese (`animefire`, `goyabu`) sources. It is the **least verified** engine here: it has no
+machine-readable search, so the show cannot be chosen by ID. Instead the anime, season and episode are read from the folder and
+file name it writes and must match; a wrong anime is stopped as soon as its file appears; the usual audio checks apply. If
+anything in its output does not fit what this tool expects, the log says exactly what it wrote. Try it safely with
+`anilist-autodl try "name"` before relying on it.
+
+> ani-cli-rs, ani-tupi and GoAnime are new here. They were built against their documentation / source and tested with simulated
 > sources, not with the live sites. If something misbehaves, run `anilist-autodl doctor` and attach its output and the
 > `[helper]` / `ani-cli-rs` lines from `anilist-autodl logs` to an issue.
 
@@ -105,6 +112,8 @@ anilist-autodl logs       # follow the log (add "full" for yt-dlp/ffmpeg output)
 anilist-autodl update     # update the engines now
 anilist-autodl doctor     # test every engine and show what ani-cli-rs really returns
 anilist-autodl check FILE # audio/subtitle tracks of a video and whether it would be accepted
+anilist-autodl trace TEXT # how an anime of your lists is searched and matched (no download)
+anilist-autodl try TEXT [EP] # run the real pipeline for an anime of your lists, deliver nothing
 anilist-autodl retry      # forget failed episodes so they are retried on the next run
 anilist-autodl config     # change any setting (re-runs the questions)
 anilist-autodl job        # run once through Android's scheduler, like the automatic runs
@@ -121,6 +130,7 @@ file; the next run picks them up. After changing `INTERVAL_MINUTES`, `WIFI_ONLY`
 | `AUTODL_LANG` | `en` | `en` or `pt` (notification language) |
 | `AUTODL_ENGINE` | by language | main engine: `ani-cli-rs`, `ani-cli` or `ani-tupi` |
 | `AUTODL_BACKUP_ENGINE` | `ani-cli` (English) / empty | used when the main engine fails; empty = none |
+| `GOANIME_SOURCES` | `anidb` (en) / `animefire goyabu` (pt) | GoAnime sources to try, in order; only those your GoAnime lists in `goanime -h` are used |
 | `PREFER_SUBS` | `true` | ani-cli-rs: a `sub` file without subtitle tracks makes it try the other catalog before accepting it |
 | `ANILIST_USERNAME` | – | your AniList name |
 | `AUDIO` / `AUDIO_FALLBACK` | `sub` / `true` | preferred version; accept the other one if missing |
@@ -141,7 +151,7 @@ the `--dub` flag is used.
 ## 4. Files
 
 - `~/.anilist-autodl/` — the scripts (`fetch_anime.py`, `fetch_episode_tupi.py`, `run.sh`, `update.sh`, `install.sh`) and the
-  ani-cli-rs sources (`ani-cli-rs-src/`, built by the installer)
+  ani-cli-rs sources (`ani-cli-rs-src/`, built by the installer; `go/` is GoAnime's Go workspace, emptied after the build)
 - `~/.config/anilist-autodl/config` — your settings
 - `~/.anime_downloader.log` / `~/.anime_downloader_output.log` — script log / full output
 - `~/.anime_downloader_state.json` — history and failure timestamps
@@ -172,6 +182,17 @@ Your downloaded episodes are not touched.
   `termux-fix-shebang $PREFIX/bin/ani-cli`.
 - **"Overwrite? [y/N]" or "No such file" from ffmpeg:** make sure `~/.config/yt-dlp/config` has no `--force-overwrite` or
   `--no-m3u8-fixup` (the installer removes them) and only one copy of the job runs.
+- **An anime is searched wrongly / a stage or season is not found:** `anilist-autodl trace "name"` shows the search texts
+  per engine, what ani-cli-rs's catalogs return and why each result is accepted or rejected (words, then season/stage
+  numbers: "1st STAGE" and "2nd - 3rd STAGE" are different entries). `anilist-autodl try "name"` runs the whole pipeline
+  without delivering anything.
+- **GoAnime: `finished without a video` / `the anime name cannot be read`:** the log shows GoAnime's last output lines and
+  any video it wrote outside the temporary folder. GoAnime may need an interactive choice (no keyboard here), ignore
+  `GOANIME_DOWNLOAD_DIR`, or name files differently than expected; attach those log lines to an issue. If it says it needs a
+  newer Go or `mpv`: `pkg upgrade` / `pkg install mpv`.
+- **GoAnime build fails:** the installer builds it with Termux's own Go (`GOTOOLCHAIN=local`: an auto-downloaded Go cannot
+  resolve DNS on Android). If it needs a newer Go than Termux has, run `pkg upgrade` and the installer again; meanwhile the
+  backup engine becomes the main one.
 - **A video has no sound / the audio stops early:** since 2.1 such files are rejected automatically and the next source is
   tried (see the log line `no audio track`). To inspect any file yourself: `anilist-autodl check "/sdcard/Download/Anime/Show Episode 3.mp4"`.
 - **ani-cli-rs finds nothing or `could not parse this output`:** run `anilist-autodl doctor`. It shows what each catalog
@@ -180,6 +201,11 @@ Your downloaded episodes are not touched.
 - **A file has no subtitles:** the log line says `NO subtitle tracks` when ani-cli-rs delivered one without tracks. Such a
   file may be hardsubbed (subtitles burned into the picture), which cannot be detected. Files from ani-cli or ani-tupi are
   never checked for subtitles.
+- **The ani-cli-rs build stops with `Text file busy (os error 26)`:** a known race of parallel Rust builds on Android. The
+  installer now retries automatically with fewer parallel jobs (finished parts are kept). If it still fails, it continues
+  with the backup engine and remembers: the next interactive run offers ani-cli-rs again. To retry right away without
+  questions: `bash install.sh --yes --engine ani-cli-rs --set AUTODL_BACKUP_ENGINE=ani-cli`. By hand:
+  `cd ~/.anilist-autodl/ani-cli-rs-src && CARGO_BUILD_JOBS=1 cargo build --release --locked && install -Dm755 target/release/ani-cli-rs $PREFIX/bin/ani-cli-rs`.
 - **The ani-cli-rs build fails (out of memory):** close other apps and run the installer again, or pick ani-cli as the main
   engine in *Custom* mode.
 - **A wrong anime was downloaded (fixed in 2.0.1):** delete that file from your download folder. The episode it was
@@ -216,8 +242,9 @@ without warranty of any kind. Not affiliated with AniList, ani-cli or ani-tupi.
 
 ## Credits
 
-- [ani-cli-rs](https://github.com/vorlie/ani-cli-rs), [ani-cli](https://github.com/pystardust/ani-cli) (GPL-3.0) and
-  [ani-tupi](https://github.com/levyvix/ani-tupi), downloaded or built at install time, not redistributed here.
+- [ani-cli-rs](https://github.com/vorlie/ani-cli-rs), [ani-cli](https://github.com/pystardust/ani-cli) (GPL-3.0),
+  [ani-tupi](https://github.com/levyvix/ani-tupi) and [GoAnime](https://github.com/alvarorichard/GoAnime), downloaded or
+  built at install time, not redistributed here.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp), [ffmpeg](https://ffmpeg.org), [Termux](https://termux.dev) and the
   [AniList API](https://anilist.gitbook.io/anilist-apiv2-docs/).
 

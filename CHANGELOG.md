@@ -1,5 +1,36 @@
 # Changelog
 
+## 2.2.0
+- **New optional engine: [GoAnime](https://github.com/alvarorichard/GoAnime)** (English `anidb`; Portuguese `animefire`,
+  `goyabu`). Built with Termux's own Go (`GOTOOLCHAIN=local`). It cannot be searched without downloading, so it is **guarded**:
+  the anime, season and episode are read from the path it writes (Jellyfin/Plex style folders are understood) and must match,
+  a wrong anime is stopped as soon as its file appears, the sources offered by `goanime -h` decide what is used (AllAnime was
+  removed in GoAnime 1.8.7), `--dub` is used only if this version has it, and the audio check applies. When a run produces
+  nothing usable, the log shows GoAnime's last output and any video written outside the temporary folder.
+- `GOANIME_SOURCES` setting. Updater: asks the Go proxy for the latest version, builds into a temporary folder and replaces
+  the binary only after a self-test (the old one is kept).
+- **`anilist-autodl try TEXT [EP]`**: runs the real pipeline (every engine in order) for an anime of your lists, delivers nothing
+  and records nothing.
+- A file GoAnime got right but without audio no longer triggers the remaining search texts (same stream).
+
+## 2.1.2
+- **Fixed: ani-cli-rs/ani-tupi searched "JoJos" instead of "JoJo's".** The symbol-free search text made for ani-cli (it does not
+  URL-encode) was sent to every engine. ani-cli-rs and ani-tupi now get the original titles first, then the cleaned ones, then
+  the parts of "Title: Subtitle"; ani-cli keeps the cleaned text.
+- **Fixed: "1st STAGE" and "2nd - 3rd STAGE" looked identical.** Search results must now match in words **and** season/stage
+  numbers (`STEEL BALL RUN JoJo's Bizarre Adventure 1st STAGE` can no longer be taken for the 2nd - 3rd STAGE entry, which
+  would have downloaded the wrong show's episode). "Stage" counts as a split-cour marker like "Part".
+- When nothing matches, the log lists what the catalog returned and why each result was rejected.
+- New command `anilist-autodl trace TEXT`: shows, without downloading, the search texts, the catalog results, the verdict
+  for each and whether the wanted episode is listed.
+
+## 2.1.1
+- **Fixed: the ani-cli-rs build gave up on `Text file busy (os error 26)`.** That is a race between parallel Rust build jobs
+  on Android (a build script is executed while another job still has it open). The installer and the updater now retry the
+  build with fewer parallel jobs (up to 4, then 2, then 1; finished crates are cached, so retries are cheap).
+- When the build still fails, the installer remembers it: the next interactive run explains and offers ani-cli-rs again
+  (restoring it as main or as backup, as it was). Unattended runs never retry on their own.
+
 ## 2.1.0
 - **New English engine: [ani-cli-rs](https://github.com/vorlie/ani-cli-rs)**, with **ani-cli as backup**. It is the default for
   English; built from source by the installer (Termux has no prebuilt binary).

@@ -36,13 +36,21 @@ _m_en() {
     eng_rs) echo "ani-cli-rs  (English; Rust port: embeds subtitles, picks the exact anime) - recommended";;
     eng_cli) echo "ani-cli  (English; the original, simple)";;
     eng_tupi) echo "ani-tupi  (Portuguese; Brazilian sources)";;
+    eng_goanime) echo "GoAnime  (English + Portuguese sources; experimental, built with Go)";;
     eng_none) echo "None";;
+    st_goanime) echo "Building GoAnime with Go (5-15 min, keep Termux open)";;
+    engine_fail_drop) echo "%s could not be installed. Continuing without a backup engine.";;
+    engine_fail_swap) echo "%s could not be installed. Using %s as the main engine instead (run the installer again to retry).";;
+    engine_fail_die) echo "%s could not be installed. Run the installer again or choose another engine.";;
+    go_hint) echo "If the error says GoAnime needs a newer Go: run 'pkg upgrade', then the installer again.";;
     q_backup) echo "Backup engine (used when the main one cannot deliver a valid file):";;
     q_prefer_subs) echo "ani-cli-rs: when a subtitled file has no subtitle tracks, try its other catalog before accepting it?";;
     st_rs) echo "Building ani-cli-rs from source (Rust compile: 5-15 min, keep Termux open)";;
     rs_fail_swap) echo "ani-cli-rs could not be built. Using %s as the main engine instead (run the installer again to retry).";;
     rs_fail_drop) echo "ani-cli-rs could not be built. Continuing without a backup engine.";;
     rs_fail_die) echo "ani-cli-rs could not be built. Run the installer again or choose another engine.";;
+    rs_retry) echo "The build stopped (often a harmless 'Text file busy' race on Android). Finished parts are kept; retrying with %s parallel job(s)...";;
+    rs_retry_notice) echo "ani-cli-rs could not be built last time. The questions below try it again (the build resumes from what was already compiled).";;
     upgrade_notice) echo "New in this version: ani-cli-rs (English engine that embeds subtitles and picks the exact anime) with ani-cli as backup, and an automatic audio check on every download. The questions below start from the new defaults.";;
     found_prev) echo "Found previous settings: AniList user %s, engine %s.";;
     reuse_prev) echo "Reuse them?";;
@@ -147,13 +155,21 @@ _m_pt() {
     eng_rs) echo "ani-cli-rs  (inglês; port em Rust: embute legendas, escolhe o anime exato) - recomendado";;
     eng_cli) echo "ani-cli  (inglês; o original, simples)";;
     eng_tupi) echo "ani-tupi  (português; fontes brasileiras)";;
+    eng_goanime) echo "GoAnime  (fontes em inglês e português; experimental, compilado com Go)";;
     eng_none) echo "Nenhum";;
+    st_goanime) echo "Compilando o GoAnime com Go (5-15 min, mantenha o Termux aberto)";;
+    engine_fail_drop) echo "Não foi possível instalar o %s. Continuando sem motor de reserva.";;
+    engine_fail_swap) echo "Não foi possível instalar o %s. Usando %s como motor principal (rode o instalador de novo para tentar outra vez).";;
+    engine_fail_die) echo "Não foi possível instalar o %s. Rode o instalador de novo ou escolha outro motor.";;
+    go_hint) echo "Se o erro disser que o GoAnime precisa de um Go mais novo: rode 'pkg upgrade' e depois o instalador de novo.";;
     q_backup) echo "Motor de reserva (usado quando o principal não entrega um arquivo válido):";;
     q_prefer_subs) echo "ani-cli-rs: quando um arquivo legendado vier sem faixas de legenda, tentar o outro catálogo antes de aceitar?";;
     st_rs) echo "Compilando o ani-cli-rs a partir do código-fonte (Rust: 5-15 min, mantenha o Termux aberto)";;
     rs_fail_swap) echo "Não foi possível compilar o ani-cli-rs. Usando %s como motor principal (rode o instalador de novo para tentar outra vez).";;
     rs_fail_drop) echo "Não foi possível compilar o ani-cli-rs. Continuando sem motor de reserva.";;
     rs_fail_die) echo "Não foi possível compilar o ani-cli-rs. Rode o instalador de novo ou escolha outro motor.";;
+    rs_retry) echo "A compilação parou (costuma ser a corrida inofensiva 'Text file busy' do Android). As partes prontas são mantidas; tentando de novo com %s job(s) em paralelo...";;
+    rs_retry_notice) echo "Da última vez não foi possível compilar o ani-cli-rs. As perguntas abaixo tentam de novo (a compilação continua do que já foi feito).";;
     upgrade_notice) echo "Novidade desta versão: ani-cli-rs (motor em inglês que embute legendas e escolhe o anime exato) com o ani-cli de reserva, e uma checagem automática de áudio em todo download. As perguntas abaixo partem dos novos padrões.";;
     found_prev) echo "Configuração anterior encontrada: usuário AniList %s, motor %s.";;
     reuse_prev) echo "Reaproveitar?";;
@@ -260,7 +276,7 @@ die()  { printf '\033[0;31mError:\033[0m %s\n' "$*" >&2; exit 1; }
 out()  { printf '%s\n' "$*"; }   # stdout stays the terminal even under `curl | bash`; only stdin is the script
 
 # ------------------------------------------------------------------ options / state
-KEYS=(AUTODL_LANG AUTODL_ENGINE AUTODL_BACKUP_ENGINE PREFER_SUBS ANILIST_USERNAME AUDIO AUDIO_FALLBACK DOWNLOAD_DIR AHEAD_FINISHED AHEAD_AIRING
+KEYS=(AUTODL_LANG AUTODL_ENGINE AUTODL_BACKUP_ENGINE PREFER_SUBS GOANIME_SOURCES ANILIST_USERNAME AUDIO AUDIO_FALLBACK DOWNLOAD_DIR AHEAD_FINISHED AHEAD_AIRING
       DOWNLOAD_PLANNING INTERVAL_MINUTES RETRY_COOLDOWN_HOURS TIMEOUT_MINUTES MIN_FREE_GB TRASH_DAYS
       WIFI_ONLY BATTERY_NOT_LOW AUTO_UPDATE UPDATE_EVERY_DAYS)
 declare -A PRESET=()
@@ -271,7 +287,7 @@ NO_RUN=0
 INTERACTIVE=1
 
 init_defaults() {
-  AUTODL_LANG=""; AUTODL_ENGINE=""; AUTODL_BACKUP_ENGINE=""; PREFER_SUBS=true; ANILIST_USERNAME=""
+  AUTODL_LANG=""; AUTODL_ENGINE=""; AUTODL_BACKUP_ENGINE=""; PREFER_SUBS=true; GOANIME_SOURCES=""; ANILIST_USERNAME=""
   UPGRADE_NOTICE=0
   AUDIO=sub; AUDIO_FALLBACK=true
   DOWNLOAD_DIR=/sdcard/Download/Anime
@@ -428,6 +444,17 @@ load_previous() {
     if ! grep -q '^AUTODL_BACKUP_ENGINE=' "$CONF" && [ "$AUTODL_ENGINE" = ani-cli ] && [ "$INTERACTIVE" = 1 ]; then
       AUTODL_ENGINE=ani-cli-rs; AUTODL_BACKUP_ENGINE=ani-cli; UPGRADE_NOTICE=1
     fi
+    # The last ani-cli-rs build failed and the installer fell back: offer it again (interactive runs only).
+    if [ -f "$INSTALL_DIR/.rs_build_failed" ] && [ "$INTERACTIVE" = 1 ] && ! chain_has ani-cli-rs; then
+      if [ "$(cat "$INSTALL_DIR/.rs_build_failed" 2>/dev/null)" = backup ]; then
+        AUTODL_BACKUP_ENGINE=ani-cli-rs
+      else
+        [ -n "$AUTODL_BACKUP_ENGINE" ] || AUTODL_BACKUP_ENGINE="$AUTODL_ENGINE"
+        AUTODL_ENGINE=ani-cli-rs
+      fi
+      [ "$AUTODL_BACKUP_ENGINE" = "$AUTODL_ENGINE" ] && AUTODL_BACKUP_ENGINE=""
+      UPGRADE_NOTICE=2
+    fi
   elif [ -f "$HOME/fetch_anime.py" ]; then            # pre-1.0 layout: reuse what it knew
     local u
     u="$(sed -n "s/^ANILIST_USERNAME = '\\(.*\\)'.*/\\1/p" "$HOME/fetch_anime.py" | head -n1)"
@@ -468,16 +495,16 @@ questions() {
   fi
   if [ "$MODE" = custom ] || is_preset AUTODL_ENGINE; then
     ask_choice AUTODL_ENGINE "$(m lang_pick)" "$def_engine" \
-      ani-cli-rs "$(m eng_rs)" ani-cli "$(m eng_cli)" ani-tupi "$(m eng_tupi)"
+      ani-cli-rs "$(m eng_rs)" ani-cli "$(m eng_cli)" ani-tupi "$(m eng_tupi)" goanime "$(m eng_goanime)"
     [ "$AUTODL_ENGINE" = "$def_engine" ] || def_backup="$(default_backup_for "$AUTODL_ENGINE")"
   else
     AUTODL_ENGINE="$def_engine"
   fi
   if [ "$MODE" = custom ] || is_preset AUTODL_BACKUP_ENGINE; then
     local -a opts=(none "$(m eng_none)") e
-    for e in ani-cli-rs ani-cli ani-tupi; do
+    for e in ani-cli-rs ani-cli ani-tupi goanime; do
       [ "$e" = "$AUTODL_ENGINE" ] && continue
-      case "$e" in ani-cli-rs) opts+=("$e" "$(m eng_rs)");; ani-cli) opts+=("$e" "$(m eng_cli)");; *) opts+=("$e" "$(m eng_tupi)");; esac
+      case "$e" in ani-cli-rs) opts+=("$e" "$(m eng_rs)");; ani-cli) opts+=("$e" "$(m eng_cli)");; ani-tupi) opts+=("$e" "$(m eng_tupi)");; *) opts+=("$e" "$(m eng_goanime)");; esac
     done
     ask_choice AUTODL_BACKUP_ENGINE "$(m q_backup)" "${def_backup:-none}" "${opts[@]}"
     [ "$AUTODL_BACKUP_ENGINE" = none ] && AUTODL_BACKUP_ENGINE=""
@@ -537,8 +564,9 @@ apply_presets_quiet() {  # keys that were set with --set but not asked in quick 
 validate_all() {
   local k
   v_user "$ANILIST_USERNAME" || die "$(m bad_preset ANILIST_USERNAME "$ANILIST_USERNAME")"
-  case "$AUTODL_ENGINE" in ani-cli|ani-cli-rs|ani-tupi) ;; *) die "$(m bad_preset AUTODL_ENGINE "$AUTODL_ENGINE")";; esac
-  case "$AUTODL_BACKUP_ENGINE" in ""|ani-cli|ani-cli-rs|ani-tupi) ;; *) die "$(m bad_preset AUTODL_BACKUP_ENGINE "$AUTODL_BACKUP_ENGINE")";; esac
+  case "$AUTODL_ENGINE" in ani-cli|ani-cli-rs|ani-tupi|goanime) ;; *) die "$(m bad_preset AUTODL_ENGINE "$AUTODL_ENGINE")";; esac
+  [[ "$GOANIME_SOURCES" =~ ^[a-z0-9,\ -]*$ ]] || die "$(m bad_preset GOANIME_SOURCES "$GOANIME_SOURCES")"
+  case "$AUTODL_BACKUP_ENGINE" in ""|ani-cli|ani-cli-rs|ani-tupi|goanime) ;; *) die "$(m bad_preset AUTODL_BACKUP_ENGINE "$AUTODL_BACKUP_ENGINE")";; esac
   [ "$AUTODL_BACKUP_ENGINE" != "$AUTODL_ENGINE" ] || die "$(m bad_preset AUTODL_BACKUP_ENGINE "$AUTODL_BACKUP_ENGINE")"
   case "$AUDIO" in sub|dub) ;; *) die "$(m bad_preset AUDIO "$AUDIO")";; esac
   v_dir "$DOWNLOAD_DIR" || die "$(m bad_preset DOWNLOAD_DIR "$DOWNLOAD_DIR")"
@@ -598,25 +626,54 @@ step_pkg_install() {
   chain_has ani-cli && pk="$pk aria2 fzf"
   chain_has ani-cli-rs && pk="$pk rust termux-tools aria2"
   chain_has ani-tupi && pk="$pk rust clang make binutils libjpeg-turbo libpng freetype python-pillow"
+  chain_has goanime && pk="$pk golang"
   # yt-dlp comes from pip when ani-tupi is used (it imports it), otherwise from Termux
   chain_has ani-tupi || pk="$pk yt-dlp"
   # shellcheck disable=SC2086
   pkg install -y $pk || die "$(m pkg_fail)"
 }
 
+# cargo can die with "Text file busy" (ETXTBSY) on Android: a build script is executed while another parallel job still
+# holds it open for writing. It is a race, so retrying with fewer jobs works; finished crates are cached, retries are cheap.
+rs_build() {
+  local src="$1" first jobs attempt=0
+  first="$(nproc 2>/dev/null || echo 2)"; [ "$first" -gt 4 ] && first=4      # more jobs can also exhaust a phone's RAM
+  for jobs in "$first" 2 1; do
+    attempt=$((attempt + 1))
+    ( cd "$src" && CARGO_BUILD_JOBS="$jobs" cargo build --release --locked ) && return 0
+    [ "$attempt" -lt 3 ] && warn "$(m rs_retry "$([ "$attempt" = 1 ] && echo 2 || echo 1)")" && sleep 2
+  done
+  return 1
+}
+
 step_ani_cli_rs() {
   say "$(m st_rs)"
-  local src="$INSTALL_DIR/ani-cli-rs-src" jobs
-  jobs="$(nproc 2>/dev/null || echo 2)"; [ "$jobs" -gt 4 ] && jobs=4     # more jobs can exhaust a phone's RAM
+  local src="$INSTALL_DIR/ani-cli-rs-src"
   mkdir -p "$INSTALL_DIR"
   if [ -d "$src/.git" ]; then
     git -C "$src" fetch --depth 1 origin && git -C "$src" reset --hard FETCH_HEAD || return 1
   else
     rm -rf "$src"; git clone --depth 1 https://github.com/vorlie/ani-cli-rs.git "$src" || return 1
   fi
-  ( cd "$src" && CARGO_BUILD_JOBS="$jobs" cargo build --release --locked ) || return 1
+  rs_build "$src" || return 1
   install -Dm755 "$src/target/release/ani-cli-rs" "$PREFIX/bin/ani-cli-rs" || return 1
-  "$PREFIX/bin/ani-cli-rs" --version >/dev/null 2>&1
+  "$PREFIX/bin/ani-cli-rs" --version >/dev/null 2>&1 || return 1
+  rm -f "$INSTALL_DIR/.rs_build_failed"
+}
+
+step_goanime() {
+  say "$(m st_goanime)"
+  local jobs gopath="$INSTALL_DIR/go"
+  jobs="$(nproc 2>/dev/null || echo 2)"; [ "$jobs" -gt 4 ] && jobs=4
+  mkdir -p "$INSTALL_DIR"
+  # GOTOOLCHAIN=local: an auto-downloaded Go toolchain is a plain Linux build that cannot resolve DNS on Android
+  if ! GOTOOLCHAIN=local GOPATH="$gopath" GOBIN="$PREFIX/bin" GOFLAGS="-p=$jobs" \
+       go install github.com/alvarorichard/Goanime/cmd/goanime@latest; then
+    warn "$(m go_hint)"; return 1
+  fi
+  GOPATH="$gopath" go clean -cache -modcache >/dev/null 2>&1      # free the hundreds of MB the build used
+  "$PREFIX/bin/goanime" -h >/dev/null 2>&1 || return 1
+  : > "$INSTALL_DIR/.built_goanime"                                # uninstall removes the binary only if WE built it
 }
 
 step_ani_cli() {
@@ -702,10 +759,21 @@ do_install() {
   if chain_has ani-cli-rs && ! step_ani_cli_rs; then          # the long Rust build is the likeliest step to fail
     if [ "$AUTODL_BACKUP_ENGINE" = ani-cli-rs ]; then
       warn "$(m rs_fail_drop)"; AUTODL_BACKUP_ENGINE=""; write_config
+      echo backup > "$INSTALL_DIR/.rs_build_failed"
     elif [ -n "$AUTODL_BACKUP_ENGINE" ]; then
       warn "$(m rs_fail_swap "$AUTODL_BACKUP_ENGINE")"; AUTODL_ENGINE="$AUTODL_BACKUP_ENGINE"; AUTODL_BACKUP_ENGINE=""; write_config
+      echo main > "$INSTALL_DIR/.rs_build_failed"
     else
       die "$(m rs_fail_die)"
+    fi
+  fi
+  if chain_has goanime && ! step_goanime; then
+    if [ "$AUTODL_BACKUP_ENGINE" = goanime ]; then
+      warn "$(m engine_fail_drop GoAnime)"; AUTODL_BACKUP_ENGINE=""; write_config
+    elif [ -n "$AUTODL_BACKUP_ENGINE" ]; then
+      warn "$(m engine_fail_swap GoAnime "$AUTODL_BACKUP_ENGINE")"; AUTODL_ENGINE="$AUTODL_BACKUP_ENGINE"; AUTODL_BACKUP_ENGINE=""; write_config
+    else
+      die "$(m engine_fail_die GoAnime)"
     fi
   fi
   step_files
@@ -762,6 +830,8 @@ do_uninstall() {
   fi
   rm -f "$PREFIX/bin/anilist-autodl"
   [ -d "$INSTALL_DIR/ani-cli-rs-src" ] && rm -f "$PREFIX/bin/ani-cli-rs"      # only when this installer built it
+  [ -f "$INSTALL_DIR/.built_goanime" ] && rm -f "$PREFIX/bin/goanime"
+  [ -d "$INSTALL_DIR/go" ] && chmod -R u+w "$INSTALL_DIR/go" 2>/dev/null          # Go's module cache is read-only
   rm -rf "$INSTALL_DIR" "$CONF_DIR" "$HOME/.anime_tmp"
   rm -rf "$HOME/.anime_hold"
   rm -f "$HOME"/.anime_downloader* "$HOME/.anime_download_history.json"
@@ -792,8 +862,8 @@ main() {
   [ -n "$SRCF" ] || die "installer files not found"
 
   local reuse=false
-  if [ "$UPGRADE_NOTICE" = 1 ]; then
-    out ""; out "$(m upgrade_notice)"
+  if [ "$UPGRADE_NOTICE" != 0 ]; then
+    out ""; out "$([ "$UPGRADE_NOTICE" = 2 ] && m rs_retry_notice || m upgrade_notice)"
   elif [ "$HAD_CONFIG" = 1 ] && [ -n "$ANILIST_USERNAME" ] && [ -z "$MODE" ]; then
     out "$(m found_prev "$ANILIST_USERNAME" "$AUTODL_ENGINE")"
     ask_yn reuse "$(m reuse_prev)" true

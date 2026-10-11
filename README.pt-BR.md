@@ -10,10 +10,17 @@ Você escolhe as fontes na instalação:
 | English | [ani-cli-rs](https://github.com/vorlie/ani-cli-rs) | [ani-cli](https://github.com/pystardust/ani-cli) | inglês, legendado/dublado; o ani-cli-rs embute as legendas no arquivo |
 | Português | [ani-tupi](https://github.com/levyvix/ani-tupi) | nenhum | português do Brasil (dublado/legendado) |
 
-No modo *Personalizado* dá para trocar o motor principal e o de reserva (qualquer um dos três, em qualquer ordem). O de reserva
+No modo *Personalizado* dá para trocar o motor principal e o de reserva (qualquer um dos quatro, em qualquer ordem). O de reserva
 entra sempre que o principal não entrega um arquivo válido: anime errado, sem áudio, não encontrado, provedor fora do ar, tempo esgotado.
 
-> O ani-cli-rs e o ani-tupi são novidade aqui. Foram feitos com base na documentação / no código deles e testados com fontes
+O **GoAnime** ([alvarorichard/GoAnime](https://github.com/alvarorichard/GoAnime)) também está disponível como motor opcional, com
+fontes em inglês (`anidb`) e em português do Brasil (`animefire`, `goyabu`). É o motor **menos verificado** daqui: não tem busca
+legível por máquina, então o anime não pode ser escolhido pelo ID. Em vez disso, o anime, a temporada e o episódio são lidos da
+pasta e do nome do arquivo que ele grava e precisam bater; um anime errado é interrompido assim que o arquivo aparece; as
+checagens de áudio valem também. Se algo na saída dele não bater com o esperado, o log diz exatamente o que ele gravou.
+Teste com segurança usando `anilist-autodl try "nome"` antes de depender dele.
+
+> O ani-cli-rs, o ani-tupi e o GoAnime são novidade aqui. Foram feitos com base na documentação / no código deles e testados com fontes
 > simuladas, não com os sites de verdade. Se algo se comportar mal, rode `anilist-autodl doctor` e anexe a saída e as linhas
 > `[helper]` / `ani-cli-rs` do `anilist-autodl logs` a uma issue.
 
@@ -105,6 +112,8 @@ anilist-autodl logs       # acompanha o log (use "full" para a saída do yt-dlp/
 anilist-autodl update     # atualiza os motores agora
 anilist-autodl doctor     # testa cada motor e mostra o que o ani-cli-rs realmente devolve
 anilist-autodl check ARQ  # faixas de áudio/legenda de um vídeo e se ele seria aceito
+anilist-autodl trace TEXTO # como um anime das suas listas é buscado e comparado (sem baixar)
+anilist-autodl try TEXTO [EP] # roda o processo real para um anime das suas listas, sem entregar nada
 anilist-autodl retry      # esquece episódios que falharam para tentar de novo na próxima execução
 anilist-autodl config     # muda qualquer configuração (refaz as perguntas)
 anilist-autodl job        # roda uma vez pelo agendador do Android, como as execuções automáticas
@@ -121,6 +130,7 @@ para o agendamento ser registrado de novo.
 | `AUTODL_LANG` | `en` | `en` ou `pt` (idioma das notificações) |
 | `AUTODL_ENGINE` | pelo idioma | motor principal: `ani-cli-rs`, `ani-cli` ou `ani-tupi` |
 | `AUTODL_BACKUP_ENGINE` | `ani-cli` (inglês) / vazio | usado quando o principal falha; vazio = nenhum |
+| `GOANIME_SOURCES` | `anidb` (en) / `animefire goyabu` (pt) | fontes do GoAnime a tentar, em ordem; só as que o seu GoAnime lista em `goanime -h` são usadas |
 | `PREFER_SUBS` | `true` | ani-cli-rs: um arquivo `sub` sem faixas de legenda faz tentar o outro catálogo antes de aceitar |
 | `ANILIST_USERNAME` | – | seu usuário do AniList |
 | `AUDIO` / `AUDIO_FALLBACK` | `sub` / `true` | versão preferida; aceitar a outra se faltar |
@@ -141,7 +151,7 @@ para o agendamento ser registrado de novo.
 ## 4. Arquivos
 
 - `~/.anilist-autodl/` — os scripts (`fetch_anime.py`, `fetch_episode_tupi.py`, `run.sh`, `update.sh`, `install.sh`) e o código
-  do ani-cli-rs (`ani-cli-rs-src/`, compilado pelo instalador)
+  do ani-cli-rs (`ani-cli-rs-src/`, compilado pelo instalador; `go/` é a área de trabalho do Go do GoAnime, esvaziada após a compilação)
 - `~/.config/anilist-autodl/config` — suas configurações
 - `~/.anime_downloader.log` / `~/.anime_downloader_output.log` — log do script / saída completa
 - `~/.anime_downloader_state.json` — histórico e horários de falhas
@@ -171,6 +181,17 @@ Seus episódios baixados não são tocados.
   `termux-fix-shebang $PREFIX/bin/ani-cli`.
 - **"Overwrite? [y/N]" ou "No such file" do ffmpeg:** confira se `~/.config/yt-dlp/config` não tem `--force-overwrite` nem
   `--no-m3u8-fixup` (o instalador remove) e se só uma cópia do job roda.
+- **Um anime é buscado errado / uma temporada ou stage não é achado:** `anilist-autodl trace "nome"` mostra os textos de busca
+  por motor, o que os catálogos do ani-cli-rs devolvem e por que cada resultado é aceito ou rejeitado (palavras e depois
+  números de temporada/stage: "1st STAGE" e "2nd - 3rd STAGE" são entradas diferentes). `anilist-autodl try "nome"` roda o processo
+  inteiro sem entregar nada.
+- **GoAnime: `finished without a video` / `the anime name cannot be read`:** o log mostra as últimas linhas da saída do GoAnime e
+  qualquer vídeo que ele tenha gravado fora da pasta temporária. O GoAnime pode precisar de uma escolha interativa (aqui não há
+  teclado), ignorar `GOANIME_DOWNLOAD_DIR` ou nomear os arquivos de outro jeito; anexe essas linhas do log a uma issue. Se ele
+  disser que precisa de um Go mais novo ou do `mpv`: `pkg upgrade` / `pkg install mpv`.
+- **A compilação do GoAnime falha:** o instalador usa o Go do próprio Termux (`GOTOOLCHAIN=local`: um Go baixado automaticamente
+  não resolve DNS no Android). Se precisar de um Go mais novo que o do Termux, rode `pkg upgrade` e o instalador de novo; enquanto
+  isso o motor de reserva vira o principal.
 - **Um vídeo está sem som / o áudio acaba antes:** desde a 2.1 esses arquivos são rejeitados automaticamente e a próxima fonte é
   tentada (veja no log `no audio track`). Para inspecionar qualquer arquivo: `anilist-autodl check "/sdcard/Download/Anime/Anime Episode 3.mp4"`.
 - **ani-cli-rs não acha nada ou `could not parse this output`:** rode `anilist-autodl doctor`. Ele mostra o que cada catálogo
@@ -178,6 +199,11 @@ Seus episódios baixados não são tocados.
   primeiras linhas que o `doctor` mostra a uma issue.
 - **Um arquivo está sem legendas:** o log diz `NO subtitle tracks` quando o ani-cli-rs entregou um sem faixas. Esse arquivo pode ter
   legenda queimada na imagem, o que não dá para detectar. Arquivos do ani-cli ou do ani-tupi nunca são checados quanto a legendas.
+- **A compilação do ani-cli-rs para com `Text file busy (os error 26)`:** é uma corrida conhecida das compilações paralelas de
+  Rust no Android. O instalador agora tenta de novo sozinho com menos jobs em paralelo (as partes prontas são mantidas). Se
+  ainda falhar, ele segue com o motor de reserva e lembra: a próxima execução interativa oferece o ani-cli-rs de novo. Para
+  tentar agora sem perguntas: `bash install.sh --yes --engine ani-cli-rs --set AUTODL_BACKUP_ENGINE=ani-cli`. À mão:
+  `cd ~/.anilist-autodl/ani-cli-rs-src && CARGO_BUILD_JOBS=1 cargo build --release --locked && install -Dm755 target/release/ani-cli-rs $PREFIX/bin/ani-cli-rs`.
 - **A compilação do ani-cli-rs falha (sem memória):** feche outros apps e rode o instalador de novo, ou escolha o ani-cli como
   motor principal no modo *Personalizado*.
 - **Baixou o anime errado (corrigido na 2.0.1):** apague esse arquivo da sua pasta de downloads. O episódio para o qual ele
@@ -214,8 +240,9 @@ fornecido "como está", sem garantia de qualquer tipo. Sem vínculo com AniList,
 
 ## Créditos
 
-- [ani-cli-rs](https://github.com/vorlie/ani-cli-rs), [ani-cli](https://github.com/pystardust/ani-cli) (GPL-3.0) e
-  [ani-tupi](https://github.com/levyvix/ani-tupi), baixados ou compilados na instalação, não redistribuídos aqui.
+- [ani-cli-rs](https://github.com/vorlie/ani-cli-rs), [ani-cli](https://github.com/pystardust/ani-cli) (GPL-3.0),
+  [ani-tupi](https://github.com/levyvix/ani-tupi) e [GoAnime](https://github.com/alvarorichard/GoAnime), baixados ou compilados na
+  instalação, não redistribuídos aqui.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp), [ffmpeg](https://ffmpeg.org), [Termux](https://termux.dev) e a
   [API do AniList](https://anilist.gitbook.io/anilist-apiv2-docs/).
 
