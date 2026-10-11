@@ -61,7 +61,7 @@ def _flag(key, default):
 
 ANILIST_USERNAME = _CFG.get('ANILIST_USERNAME', 'YOUR_ANILIST_USERNAME')
 LANGUAGE = _CFG.get('AUTODL_LANG', 'en') if _CFG.get('AUTODL_LANG') in ('en', 'pt') else 'en'   # notification language
-ENGINES_KNOWN = ('ani-cli', 'ani-cli-rs', 'ani-tupi')
+ENGINES_KNOWN = ('ani-cli', 'ani-cli-rs', 'ani-tupi', 'goanime')
 ENGINE = _CFG.get('AUTODL_ENGINE') if _CFG.get('AUTODL_ENGINE') in ENGINES_KNOWN else ('ani-tupi' if LANGUAGE == 'pt' else 'ani-cli')
 # Second engine, used when the first one cannot deliver a valid file (wrong anime, no audio, not found, timeout...).
 BACKUP_ENGINE = _CFG.get('AUTODL_BACKUP_ENGINE') if _CFG.get('AUTODL_BACKUP_ENGINE') in ENGINES_KNOWN else ''
@@ -94,6 +94,13 @@ MIN_SIZE_MB = 10
 MIN_DURATION_SEC = 60
 AUDIO_MIN_RATIO = 0.5          # the audio track must cover at least this share of the video's length
 RS_PROVIDERS = ('anikoto', 'anikoto2')       # ani-cli-rs has two independent catalogs
+# GoAnime sources to try, in order (English: anidb; Brazilian Portuguese: animefire, goyabu). Only the ones this GoAnime
+# version lists in `goanime -h` are used: AllAnime, for example, was removed in 1.8.7.
+GOANIME_SOURCES = [x for x in re.split(r'[\s,]+', _CFG.get('GOANIME_SOURCES', '')) if x] or \
+    (['animefire', 'goyabu'] if LANGUAGE == 'pt' else ['anidb'])
+GOANIME_KNOWN_SOURCES = ('anidb', 'animefire', 'goyabu', 'superflix', 'allanime', '9anime')
+GOANIME_OUT = os.path.expanduser('~/.anime_goanime_output.log')   # what the last goanime run printed
+DRY_RUN = False        # `anilist-autodl try`: run the whole pipeline but deliver nothing and record nothing
 SUB_EXTS = ('.vtt', '.srt', '.ass', '.ssa', '.sub')
 
 VIDEO_EXTS = ('.mp4', '.mkv', '.webm')
@@ -285,7 +292,7 @@ def notify(title, content, icon):
 STOPWORDS = {'the', 'a', 'an', 'and', 'or', 'to', 'of', 'in', 'for', 'on', 'with', 'is', 'at',
              'by', 'this', 'that', 'your', 'you', 'my', 'i', 'it', 'season', 'episode', 'ep',
              # sequel markers: "2nd Season", "Part 2", "II" tell seasons apart but are not part of the name
-             'nd', 'st', 'rd', 'th', 'ii', 'iii', 'iv', 'part', 'cour'}
+             'nd', 'st', 'rd', 'th', 'ii', 'iii', 'iv', 'part', 'cour', 'stage'}
 # tags that sources add to file names; they say nothing about WHICH anime it is
 FILE_NOISE = {'episodes', 'eps', 'dub', 'dubbed', 'sub', 'subbed', 'dublado', 'legendado', 'hd', 'uncensored'}
 
@@ -481,6 +488,8 @@ def build_env(engine):
             ANI_TUPI__ANIME_DOWNLOAD__SKIP_ALREADY_DOWNLOADED='false',   # TMP_DIR is wiped every run
             ANI_TUPI__SEARCH__ENABLE_TITLE_RESOLUTION='false',           # skip the slow Jikan fallback
         )
+    elif engine == 'goanime':
+        env.update(GOANIME_DOWNLOAD_DIR=TMP_DIR, GOANIME_DEFAULT_QUALITY='best', TERM='dumb', NO_COLOR='1', CI='true')
     else:
         env['ANI_CLI_DOWNLOAD_DIR'] = TMP_DIR
     for k, v in list(env.items()):
@@ -619,18 +628,19 @@ def safe_name(s):
     return re.sub(r'\s+', ' ', s).strip()[:120] or 'Anime'
 
 
-def stage_video(path, title, ep):
+def stage_video(path, title, ep, dest_dir=None):
     """Give a downloaded file the name the rest of this script relies on: '<Title> Episode <ep>.<ext>'.
-    Companion files (subtitles...) that share the old name follow along."""
+    Companion files (subtitles...) that share the old name follow along; dest_dir moves them all to another folder."""
     folder, old = os.path.dirname(path), os.path.basename(path)
     old_stem = os.path.splitext(old)[0]
     new_stem = f"{safe_name(title)} Episode {ep}"
-    if old_stem == new_stem:
+    dest = dest_dir or folder
+    if old_stem == new_stem and dest == folder:
         return path
     for other in os.listdir(folder):
         if other == old or other.startswith(old_stem + '.'):
-            shutil.move(os.path.join(folder, other), os.path.join(folder, new_stem + other[len(old_stem):]))
-    return os.path.join(folder, new_stem + old[len(old_stem):])
+            shutil.move(os.path.join(folder, other), os.path.join(dest, new_stem + other[len(old_stem):]))
+    return os.path.join(dest, new_stem + old[len(old_stem):])
 
 
 def hold_video(video):
@@ -843,11 +853,39 @@ def parse_rs_results(text):
     return results
 
 
+ROMAN_SEASONS = {'ii': 2, 'iii': 3, 'iv': 4}
+
+
+def sequel_markers(text):
+    """Season/stage numbers named in a title: '2nd Season', 'Season 2', 'Part 2', '2nd - 3rd STAGE', 'II' -> {2} / {2, 3}.
+    Resolutions, '(12 episodes)', years and numbers above 99 ('Mob Psycho 100') are not season numbers."""
+    text = re.sub(r'\bepisode\s*\d+.*$', ' ', text, flags=re.IGNORECASE)
+    text = re.sub(r'\(\s*\d+\s*(episodes?|eps?)\s*\)|\b\d{3,4}p\b', ' ', text, flags=re.IGNORECASE)
+    nums = {int(n) for n in re.findall(r'\d+', text) if 1 <= int(n) <= 99}
+    nums |= {ROMAN_SEASONS[w] for w in re.findall(r'[a-z]+', text.lower()) if w in ROMAN_SEASONS}
+    return nums
+
+
+def result_match(name, titles):
+    """Is this catalog entry the anime we want? -> (True, '') or (False, why).
+    Same words AND the same season/stage numbers: 'X 1st STAGE' and 'X 2nd - 3rd STAGE' are different entries (each with
+    its own episode numbering) even though their words are identical."""
+    fname = f"{name} Episode 1.mp4"
+    same_words = [t for t in titles if title_match([t], fname)]
+    if not same_words:
+        return False, 'different title'
+    mine = sequel_markers(name)
+    if not any(sequel_markers(t) == mine for t in same_words):
+        wanted = sorted({tuple(sorted(sequel_markers(t))) for t in same_words})
+        return False, f"season/stage numbers differ (entry {sorted(mine) or '-'}, wanted {[list(w) or '-' for w in wanted]})"
+    return True, ''
+
+
 def pick_result(results, titles):
-    """The search result that really is this anime: strict name check, exact name first, then the shortest."""
+    """The search result that really is this anime: right words and right season, exact name first, then the shortest."""
     best = None
     for sid, names in results:
-        ok = [n for n in names if title_match(titles, f"{n} Episode 1.mp4")]
+        ok = [n for n in names if result_match(n, titles)[0]]
         if not ok:
             continue
         exact = any(tokenize(n) == tokenize(t) for n in ok for t in titles)
@@ -906,7 +944,7 @@ def try_ani_cli_rs(candidates, titles, primary, anilist_id, target_ep):
             if provider in down:
                 continue
             clean_tmp()
-            show, errors = None, 0
+            show, errors, seen = None, 0, []
             for query in candidates:
                 rc, out, err = run_capture(rs_cmd(env, 'search', '--mode', mode, '--json', query, provider=provider), 90, env)
                 if rc is None:
@@ -919,15 +957,20 @@ def try_ani_cli_rs(candidates, titles, primary, anilist_id, target_ep):
                     errors += 1
                     log(f"[!] ani-cli-rs search failed ({provider}, '{query}', code {rc}): {(err or out).strip()[-160:]}")
                     continue
-                show = pick_result(parse_rs_results(out), titles)
+                parsed = parse_rs_results(out)
+                show = pick_result(parsed, titles)
+                log(f"[i] ani-cli-rs {provider}/{mode}: '{query}' -> {len(parsed)} result(s)" + (" (match)" if show else ""))
                 if show:
                     break
+                seen += [r for r in parsed if r not in seen]
             if not show and errors and errors >= min(len(candidates), 2):
                 down.add(provider)
                 log(f"[!] ani-cli-rs {provider} is not answering: skipping it for this episode.")
                 continue
             if not show:
-                log(f"[!] ani-cli-rs ({provider}, {mode}): nothing matches '{primary}'.")
+                log(f"[!] ani-cli-rs ({provider}, {mode}): nothing matches '{primary}' ({len(seen)} result(s) seen).")
+                for sid, names in seen[:4]:                  # say WHY, so a mismatch can be diagnosed from the log alone
+                    log(f"      - {names[0]}: {result_match(names[0], titles)[1] or 'ok'}")
                 continue
             sid, found = show
             log(f"[+] ani-cli-rs {provider}/{mode}: '{found}' [{sid}] for Ep {target_ep}...")
@@ -961,6 +1004,240 @@ def try_ani_cli_rs(candidates, titles, primary, anilist_id, target_ep):
     if held:
         log("[!] No catalog offered subtitle tracks for this episode: using the file without them (it may be hardsubbed).")
         return held, False
+    return None, False
+
+
+# ---------- Engine: GoAnime ----------
+# GoAnime has no machine-readable search, so (unlike ani-cli-rs) the show cannot be chosen by ID. It is guarded instead:
+# the anime, season and episode are read from the path it writes and must match, a wrong anime is stopped as soon as
+# its file appears, and the usual audio checks apply. It writes Jellyfin/Plex-style folders ("Show (2026)/Season 01/...").
+
+_GO_GENERIC = re.compile(r'^(?:(?:season|temporada|s)\s*0*\d+|specials?|extras?|anime|animes|downloads?|goanime|tv shows?|series)$', re.I)
+_GO_EP = (r'[sS]\d+\s*[eE](\d+)', r'\b[Ee]pisode\s*0*(\d+)', r'\b[Ee]p\.?\s*0*(\d+)', r'\b[Ee]0*(\d+)\b',
+          r'[\s_.-]0*(\d{1,3})\s*$')
+_goanime_caps = {}
+
+
+def _strip_tags(text):
+    text = re.sub(r'\(\s*(?:19|20)\d\d\s*\)|\[[^\]]*\]|\{[^}]*\}', ' ', text)    # (2026) [anidb-123] {...}
+    return re.sub(r'\s+', ' ', text).strip(' -_.')
+
+
+def goanime_identity(relpath):
+    """(anime title, season, episode) read from a path GoAnime wrote; any part may be None."""
+    parts = [p for p in relpath.replace('\\', '/').split('/') if p]
+    if not parts:
+        return None, None, None
+    name, folders = parts[-1], parts[:-1]
+    low = name.lower()
+    cuts = [low.find(m) for m in PARTIAL_MARKERS if low.find(m) > 0]
+    stem = name[:min(cuts)] if cuts else name
+    if os.path.splitext(stem)[1].lower() in VIDEO_EXTS:
+        stem = os.path.splitext(stem)[0]
+    ep = None
+    for pat in _GO_EP:
+        m = re.search(pat, stem)
+        if m:
+            ep = int(m.group(1))
+            break
+    season = None
+    m = re.search(r'[sS](\d+)\s*[eE]\d+', stem)
+    if m:
+        season = int(m.group(1))
+    for f in folders:
+        m = re.match(r'^(?:season|temporada|s)\s*0*(\d+)$', f, re.IGNORECASE)
+        if m:
+            season = int(m.group(1))
+    source = next((f for f in folders if not _GO_GENERIC.match(f)), None)
+    if source is None:                              # no folder: the title is what comes before the episode marker
+        m = re.search(r'[sS]\d+\s*[eE]\d+|\b[Ee]pisode\b|\b[Ee]p\b', stem)
+        source = stem[:m.start()] if m else re.sub(r'[\s_.-]0*\d{1,3}\s*$', '', stem)
+    return (_strip_tags(source) or None), season, ep
+
+
+def goanime_check(relpath, titles, target_ep):
+    """Is this file the wanted anime AND episode? -> (True, '') / (False, why). Season 2+ counts as 'Season N'."""
+    title, season, ep = goanime_identity(relpath)
+    if not title:
+        return False, 'the anime name cannot be read from the path'
+    named = title + (f" Season {season}" if season and season > 1 else '')
+    ok, why = result_match(named, titles)
+    if not ok:
+        return False, f"'{named}' is not the wanted anime ({why})"
+    if ep is not None and ep != target_ep:
+        return False, f"it is Ep {ep}, not Ep {target_ep}"
+    return True, ''
+
+
+def goanime_capabilities(help_text):
+    """What this GoAnime version says it can do (from `goanime -h`)."""
+    h = (help_text or '').lower()
+    return {'known': bool(h.strip()), 'source_flag': '--source' in h, 'dub_flag': '--dub' in h,
+            'sources': [x for x in GOANIME_KNOWN_SOURCES if re.search(r'(?<![\w-])' + re.escape(x) + r'(?![\w-])', h)]}
+
+
+def goanime_pick_sources(caps, wanted):
+    """Sources to try ([None] = let GoAnime search all of them)."""
+    if not caps['source_flag']:
+        return [None]
+    if not caps['sources']:
+        return list(wanted)
+    return [x for x in wanted if x in caps['sources']]
+
+
+def goanime_exe(env):
+    return shutil.which('goanime', path=env['PATH'])
+
+
+def goanime_caps(env):
+    if 'caps' not in _goanime_caps:
+        exe = goanime_exe(env)
+        caps = None
+        if exe:
+            rc, out, err = run_capture([exe, '-h'], 30, env)
+            if rc is not None:
+                caps = goanime_capabilities(out + '\n' + err)
+        _goanime_caps['caps'] = caps
+    return _goanime_caps['caps']
+
+
+def _tail(path, n=8):
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            lines = [re.sub(r'\x1b\[[0-9;?]*[A-Za-z]', '', ln).rstrip() for ln in f.readlines()]
+        return [ln for ln in lines if ln.strip()][-n:]
+    except OSError:
+        return []
+
+
+def goanime_wrong_in_progress(titles, target_ep):
+    """(path, why) of a file GoAnime is writing that is clearly NOT the wanted anime/episode, else None."""
+    for root, _, files in os.walk(TMP_DIR):
+        for f in files:
+            low = f.lower()
+            if not (low.endswith(VIDEO_EXTS) or any(m in low for m in PARTIAL_MARKERS)):
+                continue
+            rel = os.path.relpath(os.path.join(root, f), TMP_DIR)
+            ok, why = goanime_check(rel, titles, target_ep)
+            if not ok and 'cannot be read' not in why:
+                return rel, why
+    return None
+
+
+def run_goanime(cmd, env, titles, target_ep):
+    """Run goanime in its own session, output to GOANIME_OUT. Returns (status, detail): ok | wrong | timeout."""
+    with open(GOANIME_OUT, 'w', encoding='utf-8') as out:
+        p = subprocess.Popen(cmd, cwd=TMP_DIR, env=env, stdin=subprocess.DEVNULL, stdout=out,
+                             stderr=subprocess.STDOUT, start_new_session=True)
+
+        def kill():
+            try:
+                os.killpg(p.pid, signal.SIGKILL)       # also yt-dlp/ffmpeg children
+            except Exception:
+                pass
+            p.wait()
+
+        deadline = time.time() + PROCESS_TIMEOUT_SECONDS
+        while True:
+            try:
+                return 'ok', str(p.wait(timeout=2))
+            except subprocess.TimeoutExpired:
+                pass
+            wrong = goanime_wrong_in_progress(titles, target_ep)
+            if wrong:
+                kill()
+                return 'wrong', f"{wrong[0]}: {wrong[1]}"
+            if time.time() > deadline:
+                kill()
+                return 'timeout', ''
+
+
+def finished_videos(folder):
+    out = []
+    for root, _, files in os.walk(folder):
+        for f in files:
+            low = f.lower()
+            if low.endswith(VIDEO_EXTS) and not any(m in low for m in PARTIAL_MARKERS):
+                out.append(os.path.join(root, f))
+    return out
+
+
+def recent_outside_tmp(since, limit=6):
+    """Videos written during this run somewhere other than TMP_DIR (to find where a GoAnime version writes)."""
+    found = []
+    skip = {os.path.normpath(p) for p in (TMP_DIR, HOLD_DIR, DOWNLOAD_DIR, os.path.expanduser('~/storage'))}
+    for base, depth in ((os.path.expanduser('~'), 5), (os.path.expanduser('~/storage/downloads'), 2)):
+        for root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if os.path.normpath(os.path.join(root, d)) not in skip and not d.startswith('.cache')]
+            if root[len(base):].count(os.sep) >= depth:
+                dirs[:] = []
+            for f in files:
+                path = os.path.join(root, f)
+                try:
+                    if f.lower().endswith(VIDEO_EXTS) and os.path.getmtime(path) >= since - 2:
+                        found.append(path)
+                except OSError:
+                    pass
+    return found[:limit]
+
+
+def try_goanime(candidates, titles, primary, anilist_id, target_ep):
+    """Returns (video | None, timed_out)."""
+    env = build_env('goanime')
+    exe = goanime_exe(env)
+    caps = goanime_caps(env)
+    if not exe or caps is None:
+        log("[!] goanime is not installed or does not start (run: anilist-autodl doctor).")
+        return None, False
+    sources = goanime_pick_sources(caps, GOANIME_SOURCES)
+    if not sources:
+        log(f"[!] None of the configured GoAnime sources ({', '.join(GOANIME_SOURCES)}) is offered by this GoAnime "
+            f"(it lists: {', '.join(caps['sources']) or '?'}). Set GOANIME_SOURCES.")
+        return None, False
+    extra = []
+    if AUDIO == 'dub':
+        if caps['dub_flag']:
+            extra.append('--dub')
+        else:
+            log("[i] This GoAnime has no --dub flag: the preferred version cannot be requested from it.")
+    for source in sources:
+        identified = False                              # the right anime was found but its file was unusable
+        for query in candidates[:3]:                    # every attempt may download an episode: keep it short
+            if identified:
+                break                                   # other search texts would fetch the very same stream
+            clean_tmp()
+            started = time.time()
+            cmd = [exe, '-d'] + (['--source', source] if source else []) + ['--quality', 'best'] + extra + [query, str(target_ep)]
+            log(f"[+] goanime {source or '(all sources)'}: '{query}' Ep {target_ep}...")
+            status, detail = run_goanime(cmd, env, titles, target_ep)
+            if status == 'timeout':
+                return None, True
+            if status == 'wrong':
+                log(f"[!] goanime started the wrong file and was stopped: {detail}")
+                continue
+            videos = finished_videos(TMP_DIR)
+            if not videos:
+                log(f"[!] goanime finished (exit {detail}) without a video in {TMP_DIR}. Its output ends with:")
+                for ln in _tail(GOANIME_OUT):
+                    log(f"      | {ln}")
+                for path in recent_outside_tmp(started):
+                    log(f"      [i] a video was written elsewhere during this run: {path}")
+                continue
+            verdicts = []
+            for path in sorted(videos, key=os.path.getsize, reverse=True):
+                rel = os.path.relpath(path, TMP_DIR)
+                ok, why = goanime_check(rel, titles, target_ep)
+                verdicts.append((rel, ok, why))
+                _, _, ep = goanime_identity(rel)
+                if ok and (ep == target_ep or (ep is None and len(videos) == 1)):
+                    video = stage_video(path, primary, target_ep, dest_dir=TMP_DIR)
+                    if verify(video, titles):
+                        return video, False
+                    identified = True
+                    break
+            else:
+                for rel, ok, why in verdicts[:3]:
+                    log(f"[!] goanime wrote '{rel}': {why or 'the episode number cannot be read'}")
     return None, False
 
 
@@ -999,6 +1276,35 @@ def try_ani_tupi(candidates, titles, primary, anilist_id, target_ep):
     return None, False
 
 
+def build_candidates(media):
+    """Search texts per engine. ani-cli does not URL-encode, so it gets symbol-free text. ani-cli-rs and ani-tupi encode
+    properly and catalogs contain the real punctuation ("JoJo's"): they get the original titles FIRST, then the cleaned
+    ones, then the parts of 'Title: Subtitle'."""
+    t = media.get('title') or {}
+    eng, rom = t.get('english'), t.get('romaji')
+    year = media.get('seasonYear') or (media.get('startDate') or {}).get('year')
+    raw = []
+    for q in (eng, rom, f"{eng} {year}" if eng and year else None, f"{rom} {year}" if rom and year else None):
+        if q and q not in raw:
+            raw.append(q)
+    for syn in (media.get('synonyms') or [])[:2]:
+        if syn and syn not in raw:
+            raw.append(syn)
+    cleaned = []
+    for q in raw:
+        q = clean_query(q)
+        if q and q not in cleaned:
+            cleaned.append(q)
+    parts = []
+    for q in (eng, rom):
+        for piece in re.split(r'\s*[:\uff1a]\s+', q or ''):
+            if len(piece.split()) >= 2 and piece != q and piece not in parts:
+                parts.append(piece)
+    rich = list(dict.fromkeys(raw + cleaned + parts))
+    plain = list(dict.fromkeys(raw + cleaned))
+    return {'ani-cli': cleaned, 'ani-cli-rs': rich, 'ani-tupi': plain, 'goanime': plain}
+
+
 def download_anime_entry(media, target_ep):
     t = media.get('title') or {}
     eng, rom = t.get('english'), t.get('romaji')
@@ -1006,37 +1312,25 @@ def download_anime_entry(media, target_ep):
     primary = eng or rom
     titles = all_titles(media)
 
-    candidates = []
-    if eng:
-        candidates.append(eng)
-    if rom and rom != eng:
-        candidates.append(rom)
-    if eng and year:
-        candidates.append(f"{eng} {year}")
-    if rom and rom != eng and year:
-        candidates.append(f"{rom} {year}")
-    for syn in (media.get('synonyms') or [])[:2]:
-        if syn and syn not in candidates:
-            candidates.append(syn)
+    per_engine = build_candidates(media)
 
-    cleaned = []
-    for c in candidates:
-        c = clean_query(c)
-        if c and c not in cleaned:
-            cleaned.append(c)
-    candidates = cleaned
-
-    runners = {'ani-cli': try_ani_cli, 'ani-cli-rs': try_ani_cli_rs, 'ani-tupi': try_ani_tupi}
+    runners = {'ani-cli': try_ani_cli, 'ani-cli-rs': try_ani_cli_rs, 'ani-tupi': try_ani_tupi, 'goanime': try_goanime}
     timed_out_any = False
     for n, engine in enumerate(ENGINE_CHAIN):
         if n:
             log(f"[→] Trying the backup engine: {engine}")
+        candidates = per_engine[engine]
         video, timed_out = runners[engine](candidates, titles, primary, media.get('id'), target_ep)
         if timed_out:
             timed_out_any = True
             log(f"[!] TIMEOUT ({PROCESS_TIMEOUT_SECONDS // 60} min) with {engine} for '{primary}' Ep {target_ep}.")
             clean_tmp()
             continue
+        if video and DRY_RUN:
+            log(f"[dry-run] {engine} would deliver '{os.path.basename(video)}' (nothing was delivered or recorded).")
+            clean_tmp()
+            clean_hold()
+            return os.path.basename(video), None
         if video and deliver(video):
             filename = os.path.basename(video)
             log(f"[✓] Ep {target_ep} of '{primary}' downloaded with {engine} and verified.")
@@ -1183,6 +1477,88 @@ def inspect_file(path):
     return 0 if not problem else 2
 
 
+def trace(needle):
+    """`anilist-autodl trace TEXT`: take the matching entry from your Watching/Planning lists and show, without downloading
+    anything, the search texts each engine would use, what ani-cli-rs's catalogs return and why each result is accepted
+    or rejected, and whether the wanted episode is listed."""
+    os.makedirs(TMP_DIR, exist_ok=True)
+    entries = get_list(ANILIST_USERNAME, 'CURRENT') + get_list(ANILIST_USERNAME, 'PLANNING')
+    low = needle.lower()
+    found = [e for e in entries if any(low in t.lower() for t in all_titles(e.get('media') or {}))]
+    if not found:
+        print(f"Nothing on your Watching/Planning lists contains '{needle}'. Your entries:")
+        for e in entries[:15]:
+            print("  -", (all_titles(e.get('media') or {}) or ['?'])[0])
+        return 1
+    for entry in found:
+        media, progress = entry.get('media') or {}, entry.get('progress') or 0
+        titles, ep = all_titles(media), progress + 1
+        print(f"\n=== {titles[0] if titles else '?'}   (AniList id {media.get('id')}, status {media.get('status')}, "
+              f"{media.get('episodes') or '?'} episodes, your progress {progress} -> wanted Ep {ep})")
+        print("  names AniList knows:")
+        for t in titles:
+            print(f"    {t}   [season/stage numbers: {sorted(sequel_markers(t)) or '-'}]")
+        per_engine = build_candidates(media)
+        for engine in ENGINE_CHAIN:
+            print(f"\n  -- {engine}: search texts, in order")
+            for q in per_engine[engine]:
+                print(f"       {q}")
+            if engine == 'goanime':
+                print("       (GoAnime cannot be searched without downloading; use: anilist-autodl try \"" + needle + "\")")
+            if engine != 'ani-cli-rs':
+                continue
+            env = build_env(engine)
+            for mode in [AUDIO] + ([('sub' if AUDIO == 'dub' else 'dub')] if AUDIO_FALLBACK else []):
+                for provider in RS_PROVIDERS:
+                    print(f"\n  [{provider} / {mode}]")
+                    shown = False
+                    for q in per_engine[engine]:
+                        rc, out, err = run_capture(rs_cmd(env, 'search', '--mode', mode, '--json', q, provider=provider), 90, env)
+                        if rc is None or rc != 0:
+                            print(f"    '{q}': {'timed out' if rc is None else 'failed: ' + (err or out).strip()[-120:]}")
+                            continue
+                        parsed = parse_rs_results(out)
+                        pick = pick_result(parsed, titles)
+                        print(f"    '{q}' -> {len(parsed)} result(s)")
+                        for sid, names in parsed[:8]:
+                            ok, why = result_match(names[0], titles)
+                            print(f"       {'OK ' if ok else '-- '} {names[0]}   [{sid}]" + ("" if ok else f"  ({why})"))
+                        if pick:
+                            sid, name = pick
+                            rc2, out2, _ = run_capture(rs_cmd(env, 'episodes', sid, '--mode', mode, '--json'), 90, env)
+                            eps = parse_rs_episodes(out2) if rc2 == 0 else None
+                            have = "unknown (could not read the list)" if eps is None else (
+                                f"yes ({len(eps)} listed)" if str(ep) in eps else f"NO ({len(eps)} listed: {sorted(eps, key=float)[:12]})")
+                            print(f"     => would download '{name}' [{sid}]; Ep {ep} available: {have}")
+                            shown = True
+                            break
+                    if not shown:
+                        print("     => no usable result in this catalog")
+    return 0
+
+
+def try_entry(args):
+    """`anilist-autodl try TEXT [EP]`: run the REAL pipeline (all engines in order) for an entry of your lists, but deliver
+    nothing and record nothing. Default episode: your progress + 1."""
+    global DRY_RUN
+    ep = int(args[-1]) if len(args) > 1 and args[-1].isdigit() else None
+    needle = ' '.join(args[:-1] if ep is not None else args)
+    entries = get_list(ANILIST_USERNAME, 'CURRENT') + get_list(ANILIST_USERNAME, 'PLANNING')
+    found = [e for e in entries if any(needle.lower() in t.lower() for t in all_titles(e.get('media') or {}))]
+    if not found:
+        print(f"Nothing on your Watching/Planning lists contains '{needle}'.")
+        return 1
+    DRY_RUN = True
+    os.makedirs(TMP_DIR, exist_ok=True)
+    for entry in found:
+        media = entry.get('media') or {}
+        wanted = ep or (entry.get('progress') or 0) + 1
+        print(f"\n=== dry run: {all_titles(media)[0] if all_titles(media) else '?'}  Ep {wanted}  (engines: {' -> '.join(ENGINE_CHAIN)})")
+        name, reason = download_anime_entry(media, wanted)
+        print(f"=== result: {'WOULD DELIVER ' + name if name else 'failed (' + str(reason) + ')'}")
+    return 0
+
+
 def doctor():
     """`anilist-autodl doctor`: check every engine in use and show what ani-cli-rs really returns."""
     os.makedirs(TMP_DIR, exist_ok=True)
@@ -1197,6 +1573,16 @@ def doctor():
         elif engine == 'ani-cli':
             exe = shutil.which('ani-cli', path=env['PATH'])
             print(f"  binary: {exe or 'MISSING'}")
+        elif engine == 'goanime':
+            exe = goanime_exe(env)
+            print(f"  binary: {exe or 'MISSING'}")
+            if exe:
+                rc, out, err = run_capture([exe, '-h'], 30, env)
+                caps = goanime_capabilities(out + '\n' + err)
+                print(f"  --source flag: {caps['source_flag']}   --dub flag: {caps['dub_flag']}   sources it lists: {', '.join(caps['sources']) or '(none found)'}")
+                print(f"  sources this tool will use: {', '.join(x or '(all)' for x in goanime_pick_sources(caps, GOANIME_SOURCES)) or 'NONE (set GOANIME_SOURCES)'}")
+                first = [ln for ln in (out + err).splitlines() if ln.strip()][:3]
+                print("  help starts with: " + ' | '.join(first)[:200])
         else:
             rc, out, err = run_capture(rs_cmd(env, '--version'), 30, env)
             if rc != 0:
@@ -1223,5 +1609,9 @@ if __name__ == '__main__':
         sys.exit(inspect_file(sys.argv[2]))
     elif len(sys.argv) > 1 and sys.argv[1] == '--doctor':
         sys.exit(doctor())
+    elif len(sys.argv) > 2 and sys.argv[1] == '--trace':
+        sys.exit(trace(' '.join(sys.argv[2:])))
+    elif len(sys.argv) > 2 and sys.argv[1] == '--try':
+        sys.exit(try_entry(sys.argv[2:]))
     else:
         main()

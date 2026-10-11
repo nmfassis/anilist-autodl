@@ -18,6 +18,8 @@ anilist-autodl - auto-download your AniList episodes (Termux)
   anilist-autodl update     update the engines now (ani-cli-rs / ani-cli / ani-tupi)
   anilist-autodl doctor     test every engine and show what ani-cli-rs really returns
   anilist-autodl check FILE show the audio/subtitle tracks of a video and whether it would be accepted
+  anilist-autodl trace TEXT show, without downloading, how an anime on your lists is searched and matched
+  anilist-autodl try TEXT [EP]  run the real pipeline for an anime of your lists (all engines) but deliver nothing
   anilist-autodl retry      forget failed episodes so they are retried on the next run
   anilist-autodl config     change settings (re-runs the questions)
   anilist-autodl uninstall  remove it (downloaded episodes are kept)
@@ -59,11 +61,16 @@ PY
         ani-tupi)   echo "ani-tupi     : $(pip show ani-tupi 2>/dev/null | sed -n 's/^Version: //p')   auto-update=${AUTO_UPDATE:-true}" ;;
         ani-cli-rs) echo "ani-cli-rs   : $(ani-cli-rs --version 2>/dev/null | head -n1)" ;;
         ani-cli)    echo "ani-cli      : $(ani-cli -V 2>/dev/null | head -n1)" ;;
+        goanime)    echo "goanime      : $(go version -m "$PREFIX/bin/goanime" 2>/dev/null | awk '$1=="mod" {print $3; exit}')" ;;
       esac
     done
     echo "--- scheduled jobs:"; termux-job-scheduler --pending 2>/dev/null
     echo "--- last log lines:"; tail -n 8 "$LOG" 2>/dev/null ;;
   doctor)    exec python3 "$DIR/fetch_anime.py" --doctor ;;
+  try)       [ -n "${2:-}" ] || { echo 'Usage: anilist-autodl try "part of the anime name" [episode]'; exit 1; }
+             shift; exec python3 "$DIR/fetch_anime.py" --try "$@" ;;
+  trace)     [ -n "${2:-}" ] || { echo 'Usage: anilist-autodl trace "part of the anime name"'; exit 1; }
+             shift; exec python3 "$DIR/fetch_anime.py" --trace "$@" ;;
   check)     [ -n "${2:-}" ] || { echo "Usage: anilist-autodl check FILE"; exit 1; }
              exec python3 "$DIR/fetch_anime.py" --inspect "$2" ;;
   config)    exec bash "$DIR/install.sh" --reconfigure ;;

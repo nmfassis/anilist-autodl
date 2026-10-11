@@ -6,6 +6,8 @@
 # ani-tupi:    pip upgrade -> compatibility self-test -> automatic rollback if the new version breaks the bridge.
 # ani-cli-rs:  git pull + cargo build (Termux has no prebuilt binary, so its own `update` is NOT used). The new build
 #              replaces the installed one only after it passes a self-test; the old binary is kept as a backup.
+# goanime:     `go list` tells whether a newer version exists; it is built into a temporary folder and only replaces the
+#              installed binary after a self-test (the old one is kept as a backup).
 # ani-cli:     `ani-cli -U` (it updates itself), at most once a day.
 # yt-dlp (when ani-tupi is used): refreshed at most once a day.
 export PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
@@ -31,6 +33,10 @@ RS_STAMP="$DIR/.last_rs_update"
 RS_FAILED="$DIR/.rs_failed_commit"
 ANICLI_STAMP="$DIR/.last_anicli_update"
 RS_SRC="$DIR/ani-cli-rs-src"
+GO_HOME="$DIR/go"
+GO_STAMP="$DIR/.last_goanime_update"
+GO_FAILED="$DIR/.goanime_failed_version"
+GO_MOD="github.com/alvarorichard/Goanime"
 
 log() { printf '[%s] [update] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
@@ -110,12 +116,62 @@ rs_selftest() {  # rs_selftest BINARY : runs, and still has the subcommands this
     && "$1" episodes --help >/dev/null 2>&1 && "$1" download --help >/dev/null 2>&1
 }
 
+# cargo can die with "Text file busy" on Android (a race between parallel jobs): retry with fewer jobs.
+rs_build() {
+  local first jobs
+  first="$(nproc 2>/dev/null || echo 2)"; [ "$first" -gt 4 ] && first=4
+  for jobs in "$first" 2 1; do
+    ( cd "$RS_SRC" && CARGO_BUILD_JOBS="$jobs" timeout 3600 cargo build --release --locked ) && return 0
+    log "ani-cli-rs build stopped; retrying with fewer parallel jobs..."
+    sleep 2
+  done
+  return 1
+}
+
+goanime_version() {  # the module version a goanime binary was built from
+  command -v go >/dev/null 2>&1 && [ -x "$PREFIX/bin/goanime" ] \
+    && go version -m "$PREFIX/bin/goanime" 2>/dev/null | awk '$1=="mod" {print $3; exit}'
+}
+
+update_goanime() {
+  due "$GO_STAMP" "$UPDATE_EVERY_DAYS" || return 0
+  if ! command -v go >/dev/null 2>&1; then log "goanime: the Go toolchain is missing (re-run the installer)"; return 1; fi
+  local old new tmp jobs out
+  old="$(goanime_version)"
+  new="$(cd "$DIR" && GOTOOLCHAIN=local GOPATH="$GO_HOME" timeout 120 go list -m -f '{{.Version}}' "$GO_MOD@latest" 2>/dev/null)"
+  if [ -z "$new" ]; then log "goanime: could not ask the Go proxy for the latest version, will retry later"; return 0; fi
+  if [ "$new" = "$old" ]; then log "goanime $old is up to date."; touch "$GO_STAMP"; return 0; fi
+
+  log "goanime: ${old:-unknown} -> $new, building (this can take a while)..."
+  jobs="$(nproc 2>/dev/null || echo 2)"; [ "$jobs" -gt 4 ] && jobs=4
+  tmp="$(mktemp -d)"
+  if GOTOOLCHAIN=local GOPATH="$GO_HOME" GOBIN="$tmp" GOFLAGS="-p=$jobs" timeout 3600 go install "$GO_MOD/cmd/goanime@$new" \
+     && out="$("$tmp/goanime" -h 2>&1)" && printf '%s' "$out" | grep -q -- '--quality'; then
+    [ -x "$PREFIX/bin/goanime" ] && cp -f "$PREFIX/bin/goanime" "$DIR/goanime.prev"
+    if install -Dm755 "$tmp/goanime" "$PREFIX/bin/goanime"; then
+      log "goanime updated to $new"; rm -f "$GO_FAILED"; touch "$GO_STAMP"
+      GOPATH="$GO_HOME" go clean -cache -modcache >/dev/null 2>&1; rm -rf "$tmp"
+      notify "anilist-autodl" "GoAnime was updated to $new" "anilist-autodl" "O GoAnime foi atualizado para $new"
+      return 0
+    fi
+  fi
+  log "goanime $new: build or self-test failed. Keeping the installed version."
+  GOPATH="$GO_HOME" go clean -cache -modcache >/dev/null 2>&1; rm -rf "$tmp"
+  if [ "$(cat "$GO_FAILED" 2>/dev/null)" != "$new" ]; then
+    echo "$new" > "$GO_FAILED"
+    notify "anilist-autodl" "GoAnime $new failed to build. Staying on the current version." \
+           "anilist-autodl" "O GoAnime $new falhou na compilação. Continuando na versão atual." "error"
+  fi
+  touch "$GO_STAMP"
+  return 1
+}
+
 update_ani_cli_rs() {
   due "$RS_STAMP" "$UPDATE_EVERY_DAYS" || return 0
   if [ ! -d "$RS_SRC/.git" ] || ! command -v cargo >/dev/null 2>&1; then
     log "ani-cli-rs sources or the Rust toolchain are missing (re-run the installer)"; return 1
   fi
-  local old new jobs
+  local old new
   old="$(git -C "$RS_SRC" rev-parse HEAD 2>/dev/null)"
   if ! timeout 300 git -C "$RS_SRC" fetch --depth 1 origin >/dev/null 2>&1; then
     log "ani-cli-rs: could not reach GitHub, will retry later"; return 0
@@ -126,10 +182,8 @@ update_ani_cli_rs() {
   fi
 
   log "ani-cli-rs: new version found, building (this can take a while)..."
-  jobs="$(nproc 2>/dev/null || echo 2)"; [ "$jobs" -gt 4 ] && jobs=4
   git -C "$RS_SRC" reset --hard "$new" >/dev/null 2>&1
-  if ( cd "$RS_SRC" && CARGO_BUILD_JOBS="$jobs" timeout 3600 cargo build --release --locked ) \
-     && rs_selftest "$RS_SRC/target/release/ani-cli-rs"; then
+  if rs_build && rs_selftest "$RS_SRC/target/release/ani-cli-rs"; then
     [ -x "$PREFIX/bin/ani-cli-rs" ] && cp -f "$PREFIX/bin/ani-cli-rs" "$DIR/ani-cli-rs.prev"
     if install -Dm755 "$RS_SRC/target/release/ani-cli-rs" "$PREFIX/bin/ani-cli-rs"; then
       log "ani-cli-rs updated to $(ani-cli-rs --version 2>/dev/null | head -n1)"
@@ -158,6 +212,7 @@ for engine in "$AUTODL_ENGINE" "$AUTODL_BACKUP_ENGINE"; do
   case "$engine" in
     ani-tupi)   update_ytdlp; update_tupi ;;
     ani-cli-rs) update_ani_cli_rs ;;
+    goanime)    update_goanime ;;
     ani-cli)    update_ani_cli ;;
   esac
 done
