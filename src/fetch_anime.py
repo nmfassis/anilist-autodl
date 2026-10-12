@@ -5,6 +5,7 @@ All settings live in ~/.config/anilist-autodl/config (written by install.sh; run
 `anilist-autodl config` to change them). Engines: ani-cli (English sources) or
 ani-tupi (Brazilian-Portuguese sources).
 """
+import base64
 import os
 import re
 import json
@@ -866,25 +867,66 @@ def sequel_markers(text):
     return nums
 
 
+def markers_compatible(candidate, wanted):
+    """Do two sets of season/stage numbers describe the same entry? A plain title is season/stage 1.
+    A catalog may name a combined entry by its first stage only: AniList '2nd - 3rd STAGE' ({2, 3}) is the catalog's
+    '2nd Stage' ({2}). So the catalog's numbers may be a subset of the wanted range if they start at the same number."""
+    c, w = set(candidate) or {1}, set(wanted) or {1}
+    return c == w or (c <= w and min(c) == min(w))
+
+
 def result_match(name, titles):
     """Is this catalog entry the anime we want? -> (True, '') or (False, why).
-    Same words AND the same season/stage numbers: 'X 1st STAGE' and 'X 2nd - 3rd STAGE' are different entries (each with
+    Same words AND compatible season/stage numbers: 'X 1st STAGE' and 'X 2nd - 3rd STAGE' are different entries (each with
     its own episode numbering) even though their words are identical."""
     fname = f"{name} Episode 1.mp4"
     same_words = [t for t in titles if title_match([t], fname)]
     if not same_words:
         return False, 'different title'
     mine = sequel_markers(name)
-    if not any(sequel_markers(t) == mine for t in same_words):
+    if not any(markers_compatible(mine, sequel_markers(t)) for t in same_words):
         wanted = sorted({tuple(sorted(sequel_markers(t))) for t in same_words})
         return False, f"season/stage numbers differ (entry {sorted(mine) or '-'}, wanted {[list(w) or '-' for w in wanted]})"
     return True, ''
 
 
-def pick_result(results, titles):
-    """The search result that really is this anime: right words and right season, exact name first, then the shortest."""
+def rs_embedded(sid):
+    """ani-cli-rs 'anikoto:' ids are base64 JSON ({"anilistId": "...", "malId": "...", "title": "...", "episodes": N}):
+    the catalog itself says which AniList entry this is. {} when the id is not of that kind."""
+    try:
+        body = str(sid).split(':', 1)[-1].replace('+', '-').replace('/', '_')
+        data = json.loads(base64.urlsafe_b64decode(body + '=' * (-len(body) % 4)))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _embedded_anilist_id(sid):
+    emb = rs_embedded(sid)
+    value = emb.get('anilistId') or emb.get('anilist_id')
+    return str(value) if value not in (None, '') else None
+
+
+def result_verdict(sid, names, titles, anilist_id=None):
+    """(accepted, why) for one catalog result: the AniList id the catalog carries is conclusive; names are the fallback."""
+    emb_id = _embedded_anilist_id(sid)
+    if emb_id and anilist_id:
+        if emb_id == str(anilist_id):
+            return True, 'same AniList id'
+        return False, f'the catalog says this is AniList id {emb_id}, not {anilist_id}'
+    return result_match(names[0], titles)
+
+
+def pick_result(results, titles, anilist_id=None):
+    """The search result that really is this anime. An AniList id carried by the catalog decides; otherwise right words
+    and compatible season/stage numbers, exact name first, then the shortest."""
     best = None
     for sid, names in results:
+        emb_id = _embedded_anilist_id(sid)
+        if emb_id and anilist_id:
+            if emb_id == str(anilist_id):
+                return sid, names[0]
+            continue                                   # the catalog knows it is another entry
         ok = [n for n in names if result_match(n, titles)[0]]
         if not ok:
             continue
@@ -930,6 +972,17 @@ def parse_rs_episodes(text):
     return eps if eps else None
 
 
+def rs_error_summary(text):
+    """'ACL-3001 No playable sources found (the provider has no working stream for this episode)' from ani-cli-rs's output."""
+    m = re.search(r'error\[(ACL-\d+)\]:\s*([^\n]+)', text or '')
+    if m:
+        hints = {'ACL-3001': 'the provider has no working stream for this episode (yet)', 'ACL-3003': 'the stream is unavailable',
+                 'ACL-2003': 'the catalog lists no episodes', 'ACL-2004': 'that episode does not exist in this mode',
+                 'ACL-1004': 'rate limited', 'ACL-4002': 'install yt-dlp or ffmpeg'}
+        return f"{m.group(1)} {m.group(2).strip()}" + (f" ({hints[m.group(1)]})" if m.group(1) in hints else '')
+    return ' '.join((text or '').split())[:200] or 'no message'
+
+
 def try_ani_cli_rs(candidates, titles, primary, anilist_id, target_ep):
     """Search with ani-cli-rs, pick the show BY ID (strict name match), download that exact episode.
     Both catalogs are tried, then the other version (dub/sub) when allowed. Returns (video | None, timed_out)."""
@@ -958,7 +1011,7 @@ def try_ani_cli_rs(candidates, titles, primary, anilist_id, target_ep):
                     log(f"[!] ani-cli-rs search failed ({provider}, '{query}', code {rc}): {(err or out).strip()[-160:]}")
                     continue
                 parsed = parse_rs_results(out)
-                show = pick_result(parsed, titles)
+                show = pick_result(parsed, titles, anilist_id)
                 log(f"[i] ani-cli-rs {provider}/{mode}: '{query}' -> {len(parsed)} result(s)" + (" (match)" if show else ""))
                 if show:
                     break
@@ -970,23 +1023,20 @@ def try_ani_cli_rs(candidates, titles, primary, anilist_id, target_ep):
             if not show:
                 log(f"[!] ani-cli-rs ({provider}, {mode}): nothing matches '{primary}' ({len(seen)} result(s) seen).")
                 for sid, names in seen[:4]:                  # say WHY, so a mismatch can be diagnosed from the log alone
-                    log(f"      - {names[0]}: {result_match(names[0], titles)[1] or 'ok'}")
+                    log(f"      - {names[0]}: {result_verdict(sid, names, titles, anilist_id)[1] or 'ok'}")
                 continue
             sid, found = show
             log(f"[+] ani-cli-rs {provider}/{mode}: '{found}' [{sid}] for Ep {target_ep}...")
 
-            rc, out, err = run_capture(rs_cmd(env, 'episodes', sid, '--mode', mode, '--json'), 90, env)
-            eps = parse_rs_episodes(out) if rc == 0 else None
-            if eps is not None and str(target_ep) not in eps:
-                log(f"[!] Ep {target_ep} is not in the {provider} catalog yet ({len(eps)} episode(s) listed).")
-                continue
+            # The catalog's episode LISTING is not consulted: it can say "0 episodes" while the streams exist. The download
+            # itself answers fast and clearly when an episode is really missing (ACL-3001 / ACL-2004 below).
 
             rc, out, err = run_capture(rs_cmd(env, 'download', sid, target_ep, '--mode', mode, '-q', 'best',
                                               '--title', title, '--output', TMP_DIR), PROCESS_TIMEOUT_SECONDS, env)
             if rc is None:
                 return None, True
             if rc != 0:
-                log(f"[!] ani-cli-rs download exited with code {rc}: {(err or out).strip()[-200:]}")
+                log(f"[!] ani-cli-rs {provider}/{mode} could not download Ep {target_ep}: {rs_error_summary(err or out)}")
             video = find_finished_video()
             if not video:
                 continue
@@ -1518,18 +1568,23 @@ def trace(needle):
                             print(f"    '{q}': {'timed out' if rc is None else 'failed: ' + (err or out).strip()[-120:]}")
                             continue
                         parsed = parse_rs_results(out)
-                        pick = pick_result(parsed, titles)
+                        pick = pick_result(parsed, titles, media.get('id'))
                         print(f"    '{q}' -> {len(parsed)} result(s)")
                         for sid, names in parsed[:8]:
-                            ok, why = result_match(names[0], titles)
-                            print(f"       {'OK ' if ok else '-- '} {names[0]}   [{sid}]" + ("" if ok else f"  ({why})"))
+                            ok, why = result_verdict(sid, names, titles, media.get('id'))
+                            print(f"       {'OK ' if ok else '-- '} {names[0]}   [{sid[:40]}{'...' if len(sid) > 40 else ''}]" + ("" if ok else f"  ({why})"))
                         if pick:
                             sid, name = pick
                             rc2, out2, _ = run_capture(rs_cmd(env, 'episodes', sid, '--mode', mode, '--json'), 90, env)
                             eps = parse_rs_episodes(out2) if rc2 == 0 else None
-                            have = "unknown (could not read the list)" if eps is None else (
-                                f"yes ({len(eps)} listed)" if str(ep) in eps else f"NO ({len(eps)} listed: {sorted(eps, key=float)[:12]})")
-                            print(f"     => would download '{name}' [{sid}]; Ep {ep} available: {have}")
+                            listed = "could not be read" if eps is None else (
+                                f"has Ep {ep} ({len(eps)} listed)" if str(ep) in eps else f"does NOT list Ep {ep} ({len(eps)} listed: {sorted(eps, key=float)[:12]})")
+                            rc3, out3, err3 = run_capture(rs_cmd(env, 'links', '--json', sid, ep, '--mode', mode), 90, env)
+                            probe = ("timed out" if rc3 is None else
+                                     "stream sources found" if rc3 == 0 else rs_error_summary(err3 or out3))
+                            print(f"     => would download '{name}' [{sid}] Ep {ep}")
+                            print(f"        episode listing {listed}  (advisory only: the download is tried anyway)")
+                            print(f"        stream probe (ani-cli-rs links): {probe}")
                             shown = True
                             break
                     if not shown:

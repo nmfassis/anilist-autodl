@@ -21,7 +21,10 @@ MIN_SCORE = 0.6
 STOP = {'the', 'a', 'an', 'and', 'or', 'to', 'of', 'in', 'for', 'on', 'with', 'is', 'at', 'by',
         'this', 'that', 'your', 'you', 'my', 'i', 'it', 'season', 'part', 'cour', 'episode', 'ep',
         'temporada', 'parte', 'dublado', 'legendado', 'dub', 'sub', 'todos', 'episodios', 'online',
-        'hd', 'nd', 'rd', 'th', 'st'}
+        'hd', 'nd', 'rd', 'th', 'st',
+        # words Portuguese streaming sites wrap around titles
+        'os', 'as', 'o', 'de', 'da', 'do', 'dos', 'das', 'em', 'e', 'anime', 'animes', 'assistir', 'completo',
+        'completa', 'episódios', 'episódio', 'temporada', 'temporadas', 'filme', 'hd', 'full', 'watch', 'stage'}
 ROMAN = {'ii': 2, 'iii': 3, 'iv': 4}
 
 
@@ -49,6 +52,13 @@ def markers(s):
     return nums
 
 
+def compatible(candidate, wanted):
+    """Same season/stage numbers? A plain title is stage 1; a catalog may name a combined entry ('2nd - 3rd STAGE') by its
+    first stage only ('2nd Stage'), so a subset starting at the same number is fine."""
+    c, w = set(candidate) or {1}, set(wanted) or {1}
+    return c == w or (c <= w and min(c) == min(w))
+
+
 def score(expected_titles, candidate):
     """0..1 similarity between a scraper title and the known AniList names."""
     cand_w, cand_m = words(candidate), markers(candidate)
@@ -60,10 +70,11 @@ def score(expected_titles, candidate):
         if not exp_w:
             continue
         covered = len(exp_w & cand_w) / len(exp_w)          # how much of the expected title is present
-        extra = len(cand_w - exp_w) / len(cand_w)           # how much unrelated stuff the candidate adds
-        s = covered - 0.3 * extra
-        if exp_m != cand_m:                                  # "Dandadan" vs "Dandadan 2nd Season"
-            s -= 0.4
+        extra_words = len(cand_w - exp_w)                    # unrelated words the candidate adds
+        excess = max(0, extra_words - len(exp_w) // 5)       # short titles allow none ('Sword Art Online Alicization')
+        s = covered - 0.4 * excess - 0.05 * extra_words / len(cand_w)
+        if not compatible(cand_m, exp_m):                    # "Dandadan" vs "Dandadan 2nd Season"
+            s -= 0.5
         best = max(best, s)
     return best
 
