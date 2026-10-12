@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.2.2
+- **Fixed: an empty or lagging episode listing no longer blocks a download.** A catalog can report "0 episodes" (or not list the
+  wanted one) while the stream exists. ani-cli-rs's `episodes` listing is no longer consulted at all: the download is always
+  tried, and it answers fast and clearly when an episode is really missing (`ACL-3001`, `ACL-2004`...). One call less per attempt.
+- `anilist-autodl trace` still shows the listing, now labelled advisory, and adds a direct stream probe (`ani-cli-rs links`).
+- Added `tests/test_rs_flow.py`: runs the real flow against a fake `ani-cli-rs` that lists no episodes but can download.
+- ani-tupi is unchanged on purpose: it needs the episode list to get the episode's URL.
+
+## 2.2.1
+- **Fixed: a catalog that names a combined stage entry by its first stage was rejected.** AniList's "2nd & 3rd STAGE"
+  (stages 2 and 3) is "2nd Stage" in the second ani-cli-rs catalog. Season/stage numbers now match when they are equal, or when the
+  catalog's numbers are a subset of the wanted range that starts at the same number. A plain title counts as stage 1
+  (so the first stage's entry is still found, and "2nd Stage" is still never taken for it). Same rule for ani-tupi and GoAnime.
+- **ani-cli-rs ids carry the AniList entry.** `anikoto:` ids are base64 JSON with `anilistId`, `malId`, `title` and `episodes`; when
+  present, the AniList id is used as exact proof (same id = this entry, different id = never this entry), before any name matching.
+- Clearer log for failed ani-cli-rs downloads: `ACL-3001 No playable sources found (the provider has no working stream for this
+  episode (yet))` instead of the tail of the message. That code is the provider's, not a matching problem: the other catalog and
+  then the backup engine are tried.
+- `anilist-autodl trace` shows the verdict per result with the AniList-id check.
+
 ## 2.2.0
 - **New optional engine: [GoAnime](https://github.com/alvarorichard/GoAnime)** (English `anidb`; Portuguese `animefire`,
   `goyabu`). Built with Termux's own Go (`GOTOOLCHAIN=local`). It cannot be searched without downloading, so it is **guarded**:

@@ -41,8 +41,8 @@ Checks your AniList lists on a schedule (default: every hour, Wi-Fi only):
 - **Subtitles (ani-cli-rs):** it downloads the provider's subtitle tracks and, with ffmpeg, embeds them in the MP4. If a
   subtitled file comes without any, the other ani-cli-rs catalog is tried first; if none has subtitles the file is still kept
   (it may have hardsubs) and the log says so. Hardsubs cannot be detected, only subtitle tracks.
-- **Exact anime:** ani-cli-rs is asked for the show by its ID, chosen with the same strict title check, instead of "the first
-  search result".
+- **Exact anime:** ani-cli-rs is asked for the show by its ID instead of "the first search result". The ID is chosen from the
+  catalog's own AniList id when it carries one, otherwise with a strict check of the words and the season/stage numbers.
 - **Notifications:** download finished, timeout, first failure of an episode, low storage. English or Portuguese.
 - **Auto-update:** keeps the engines fresh. ani-tupi updates are self-tested and **rolled back** automatically if a new
   version stops working with this tool. ani-cli-rs is rebuilt from source only when its repository changed, and the new build
@@ -186,6 +186,11 @@ Your downloaded episodes are not touched.
   per engine, what ani-cli-rs's catalogs return and why each result is accepted or rejected (words, then season/stage
   numbers: "1st STAGE" and "2nd - 3rd STAGE" are different entries). `anilist-autodl try "name"` runs the whole pipeline
   without delivering anything.
+- **A catalog shows 0 episodes but the episode exists:** the listing is ignored on purpose (it can lag behind the streams); the
+  download is always tried. `anilist-autodl trace "name"` shows both what the listing claims and a direct stream probe.
+- **`ACL-3001 No playable sources found` from ani-cli-rs:** that provider has no working stream for the episode (often a new
+  episode that is not fully published yet). It is not a matching problem: the other catalog and then the backup engine are
+  tried automatically, and the episode is retried after the cooldown.
 - **GoAnime: `finished without a video` / `the anime name cannot be read`:** the log shows GoAnime's last output lines and
   any video it wrote outside the temporary folder. GoAnime may need an interactive choice (no keyboard here), ignore
   `GOANIME_DOWNLOAD_DIR`, or name files differently than expected; attach those log lines to an issue. If it says it needs a

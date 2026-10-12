@@ -41,8 +41,8 @@ Verifica suas listas do AniList em intervalos (padrão: a cada hora, só no Wi-F
 - **Legendas (ani-cli-rs):** ele baixa as faixas de legenda do provedor e, com o ffmpeg, embute no MP4. Se um arquivo legendado
   vier sem nenhuma, o outro catálogo do ani-cli-rs é tentado primeiro; se nenhum tiver legendas o arquivo é mantido mesmo assim
   (pode ter legenda queimada na imagem) e o log avisa. Legenda queimada não dá para detectar, só faixas de legenda.
-- **Anime exato:** o ani-cli-rs recebe o anime pelo ID, escolhido com a mesma verificação rigorosa de título, em vez de "o
-  primeiro resultado da busca".
+- **Anime exato:** o ani-cli-rs recebe o anime pelo ID em vez de "o primeiro resultado da busca". O ID é escolhido pelo id do AniList
+  que o próprio catálogo traz, quando existe, ou por uma verificação rigorosa das palavras e dos números de temporada/stage.
 - **Notificações:** download concluído, tempo esgotado, primeira falha de um episódio, pouco espaço. Em português ou inglês.
 - **Atualização automática:** mantém os motores em dia. As atualizações do ani-tupi passam por um autoteste e são **revertidas**
   automaticamente se a nova versão deixar de funcionar com esta ferramenta. O ani-cli-rs só é recompilado quando o repositório
@@ -185,6 +185,11 @@ Seus episódios baixados não são tocados.
   por motor, o que os catálogos do ani-cli-rs devolvem e por que cada resultado é aceito ou rejeitado (palavras e depois
   números de temporada/stage: "1st STAGE" e "2nd - 3rd STAGE" são entradas diferentes). `anilist-autodl try "nome"` roda o processo
   inteiro sem entregar nada.
+- **Um catálogo mostra 0 episódios mas o episódio existe:** a listagem é ignorada de propósito (ela pode atrasar em relação aos
+  streams); o download é sempre tentado. `anilist-autodl trace "nome"` mostra o que a listagem diz e uma sondagem direta do stream.
+- **`ACL-3001 No playable sources found` do ani-cli-rs:** esse provedor não tem stream funcionando para o episódio (geralmente um
+  episódio novo ainda não publicado por completo). Não é problema de comparação de nomes: o outro catálogo e depois o motor de
+  reserva são tentados automaticamente, e o episódio é tentado de novo após o intervalo.
 - **GoAnime: `finished without a video` / `the anime name cannot be read`:** o log mostra as últimas linhas da saída do GoAnime e
   qualquer vídeo que ele tenha gravado fora da pasta temporária. O GoAnime pode precisar de uma escolha interativa (aqui não há
   teclado), ignorar `GOANIME_DOWNLOAD_DIR` ou nomear os arquivos de outro jeito; anexe essas linhas do log a uma issue. Se ele
